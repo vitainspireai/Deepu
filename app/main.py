@@ -225,7 +225,8 @@ def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
         "SELECT * FROM people WHERE face_count > 0 ORDER BY face_count DESC")]
     counts = {r["event"]: r["n"] for r in db.execute(
         "SELECT event, COUNT(*) n FROM photos GROUP BY event")}
-    return {"photos": rows, "people": people, "event_counts": counts}
+    smart = db.execute("SELECT COUNT(*) n FROM photo_tags WHERE tag NOT IN ('duplicate', 'blurry')").fetchone()["n"]
+    return {"photos": rows, "people": people, "event_counts": counts, "smart_tags": smart > 0}
 
 
 @app.get("/api/pulse")
@@ -552,8 +553,8 @@ body{padding-bottom:84px}
 <a class="tool" id="zip" href="#">⬇ Download these (zip)</a>
 <a class="tool" id="sharep" onclick="sharePerson()" style="display:none">🔗 Share this person</a></div>
 <div id="grid"></div>
-<div style="padding:10px 12px;font-size:18px;font-weight:700">❓ Guess Who <small style="font-weight:400;opacity:.75">name the mystery guests — their photos unlock!</small></div>
-<div id="mystery"></div>
+<div id="guesswho" style="display:none"><div style="padding:10px 12px;font-size:18px;font-weight:700">❓ Guess Who <small style="font-weight:400;opacity:.75">name the mystery guests — their photos unlock!</small></div>
+<div id="mystery"></div></div>
 <div id="lb"><div class="row"><button class="act" onclick="closeLb()">✕ Close</button>
 <button class="act" id="clapbtn">👏 Applaud (<span id="clapn">0</span>)</button>
 <button class="act" id="sharebtn" onclick="nativeShare()">↗ Share</button>
@@ -588,7 +589,9 @@ async function loadTop3(){
   const c=top3.cover;
   document.getElementById('cover').innerHTML=c?`<img src="/thumb/${c.id}" onclick="openLbById('${c.id}')">
     <div class="tag">📰 Cover of the Day — ${disp(c.uploader)}</div>`:'';
-  document.getElementById('cats').innerHTML=CATS.map(([k,v])=>`<span class="chip ${cat===k?'on':''}" onclick="cat='${k}';loadTop3()">${v}</span>`).join("");
+  const shownCats=CATS.filter(([k])=>k==='overall'||(top3.podiums[k]||[]).length);
+  if(!shownCats.some(([k])=>k===cat))cat='overall';
+  document.getElementById('cats').innerHTML=shownCats.map(([k,v])=>`<span class="chip ${cat===k?'on':''}" onclick="cat='${k}';loadTop3()">${v}</span>`).join("");
   const list=(top3.podiums[cat]||[]);
   document.getElementById('podiums').innerHTML=list.length?list.map(p=>`<div class="podium">
     <img src="/thumb/${p.id}" onclick="openLbById('${p.id}')">
@@ -600,7 +603,8 @@ async function loadTop3(){
   document.getElementById('mystery').innerHTML=top3.mystery.length
     ? top3.mystery.map(m=>`<div class="mys"><img src="/thumb/${m.cover_photo}"><div style="font-size:12px">in ${m.face_count} photos</div>
        <input id="nm_${m.id}" placeholder="Who?"><br><button class="act" style="margin-top:4px;padding:5px 10px;font-size:13px" onclick="nameFace('${m.id}')">Say name</button></div>`).join("")
-    : '<div style="padding:6px 12px 20px;opacity:.7">All faces named — no mysteries left! 🔍</div>';
+    : '';
+  document.getElementById('guesswho').style.display=top3.mystery.length?'':'none';   // no faces found yet -> no empty game
 }
 function openLbById(id){const i=photos.findIndex(p=>p.id===id);openLb(i>=0?i:0)}
 function filterQS(){return `event=${ev}&person=${person}&uploader=${encodeURIComponent(uploaderF)}&q=${encodeURIComponent(document.getElementById('q').value)}`}
@@ -622,6 +626,8 @@ async function load(){
     ?`<span class="yr" onclick="openLb(${i})"><img src="/thumb/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
     :`<img src="/thumb/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
   if(mem&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No memories yet — be the first to share one! 📜</div>';
+  document.getElementById('people').style.display=d.people.length?'':'none';
+  document.getElementById('q').placeholder=d.smart_tags?'Search: dancing, dhol, Deepu, Krishna, mehndi…':'Search by caption or who shared it…';
   document.getElementById('people').innerHTML=d.people.map(p=>`<div class="person" onclick="setPerson('${p.id}')">
     <img src="/thumb/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
   document.getElementById('events').innerHTML=EV.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");

@@ -102,6 +102,41 @@ def quality_pass(db):
 
 
 # ---------------------------------------------------------------- faces (opt)
+def rebuild_people(db, clusters):
+    """Replace the people/face tables with freshly found clusters (sets of
+    photo ids) WITHOUT losing what the family already typed: each new cluster
+    inherits the id and name of the old person whose photos it overlaps most,
+    so names and shared ?person= links survive re-runs."""
+    old = {}  # old person id -> [name, cover, set(photo ids)]
+    for r in db.execute("SELECT id, name, cover_photo FROM people"):
+        old[r["id"]] = [r["name"], r["cover_photo"], set()]
+    for r in db.execute("SELECT photo_id, person_id FROM photo_faces"):
+        if r["person_id"] in old:
+            old[r["person_id"]][2].add(r["photo_id"])
+    kept = [c for c in clusters if len(c) >= 2]          # a face seen once isn't a "person"
+    pairs = sorted(((len(c & o[2]), i, oid) for i, c in enumerate(kept)
+                    for oid, o in old.items() if c & o[2]), reverse=True)
+    assign, used = {}, set()
+    for overlap, i, oid in pairs:                          # best overlaps first, one-to-one
+        if i in assign or oid in used:
+            continue
+        if overlap >= 0.5 * min(len(kept[i]), len(old[oid][2])):
+            assign[i] = oid
+            used.add(oid)
+    db.execute("DELETE FROM photo_faces")
+    db.execute("DELETE FROM people")
+    for i, photos in enumerate(kept):
+        oid = assign.get(i)
+        name = old[oid][0] if oid else None
+        cover = old[oid][1] if oid and old[oid][1] in photos else next(iter(photos))
+        person = oid or store.new_id()
+        db.execute("INSERT INTO people (id, name, cover_photo, face_count) VALUES (?,?,?,?)",
+                   (person, name, cover, len(photos)))
+        for pid in photos:
+            db.execute("INSERT OR IGNORE INTO photo_faces VALUES (?,?)", (pid, person))
+    db.commit()
+
+
 def face_pass(db):
     try:
         import insightface  # noqa
@@ -143,18 +178,10 @@ def face_pass(db):
                 break
         else:
             clusters.append((vec, {pid}))
-    db.execute("DELETE FROM photo_faces")
-    db.execute("DELETE FROM people")
-    for photos in (c[1] for c in clusters):
-        if len(photos) < 2:
-            continue
-        person = store.new_id()
-        cover = next(iter(photos))
-        db.execute("INSERT INTO people (id, name, cover_photo, face_count) VALUES (?,?,?,?)",
-                   (person, None, cover, len(photos)))
-        for pid in photos:
-            db.execute("INSERT OR IGNORE INTO photo_faces VALUES (?,?)", (pid, person))
-    db.commit()
+    if not clusters:
+        print("no faces found — leaving existing people untouched")
+        return
+    rebuild_people(db, [c[1] for c in clusters])
     print(f"face grouping done: {len(clusters)} faces clusters")
 
 
