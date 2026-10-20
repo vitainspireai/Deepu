@@ -209,15 +209,18 @@ def _select_photos(db, person="", event="", q="", uploader="", limit=300):
 
 @app.get("/api/photos")
 def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
-               uploader: str = "", limit: int = 300):
+               uploader: str = "", limit: int = 10000):
+    # The whole album is listed (thumbnails load lazily as you scroll), so photos
+    # never silently drop off the end once there are hundreds of them.
     if not check_token(t):
         return JSONResponse({"error": "bad link"}, status_code=403)
     db = store.connect()
+    claps = {r["photo_id"]: r["n"] for r in db.execute(
+        "SELECT photo_id, COUNT(*) n FROM applause GROUP BY photo_id")}
     rows = []
     for r in _select_photos(db, person, event, q, uploader, limit):
         row = dict(r)
-        row["applause"] = db.execute("SELECT COUNT(*) n FROM applause WHERE photo_id = ?",
-                                     (r["id"],)).fetchone()["n"]
+        row["applause"] = claps.get(r["id"], 0)
         rows.append(row)
     people = [dict(r) for r in db.execute(
         "SELECT * FROM people WHERE face_count > 0 ORDER BY face_count DESC")]
@@ -829,8 +832,8 @@ function next(){ // newly arrived photos jump the queue
   if(memQ.length&&++slides%5===0){show(memQ[mi++%memQ.length],'mem');return}  // every 5th slide: a throwback
   if(!queue.length)return; show(queue[idx%queue.length],false); idx++}
 async function loadAll(){
-  const m=await (await fetch(`/api/photos?t=${T}&event=throwback&limit=500`)).json();m.photos.forEach(p=>seen.add(p.id));memQ=m.photos;
-  const d=await (await fetch(`/api/photos?t=${T}&limit=1000`)).json();
+  const m=await (await fetch(`/api/photos?t=${T}&event=throwback&limit=10000`)).json();m.photos.forEach(p=>seen.add(p.id));memQ=m.photos;
+  const d=await (await fetch(`/api/photos?t=${T}&limit=10000`)).json();
   d.photos.forEach(p=>seen.add(p.id));
   const a=d.photos.slice();for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]]}queue=a}
 async function loadTop(){const d=await (await fetch(`/api/top3?t=${T}`)).json();
