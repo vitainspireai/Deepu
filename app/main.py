@@ -12,6 +12,7 @@ import re
 import tempfile
 import time
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime
 from html import escape
 from urllib.parse import quote
@@ -20,12 +21,25 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                StreamingResponse)
-from PIL import Image
+from PIL import Image, ImageOps
 
-from . import config, rank, store, wa
+from . import config, imaging, rank, store, wa
 from .ai_worker import analyze_one
 
-app = FastAPI(title="Wedding Photo Share")
+@asynccontextmanager
+async def lifespan(_app):
+    fixed = imaging.fix_existing(store.MEDIA_DIR, store.THUMB_DIR) if os.path.isdir(store.MEDIA_DIR) else []
+    if fixed:
+        db = store.connect()
+        for name in fixed:  # the stored sizes were for the sideways file
+            w, h = _dims(os.path.join(store.MEDIA_DIR, name))
+            db.execute("UPDATE photos SET width = ?, height = ? WHERE filename = ?", (w, h, name))
+        db.commit()
+        print(f"straightened {len(fixed)} sideways photo(s)")
+    yield
+
+
+app = FastAPI(title="Wedding Photo Share", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -98,6 +112,7 @@ async def webhook_receive(request: Request):
                         dest = os.path.join(store.MEDIA_DIR, fname)
                         try:
                             wa.download_media(media["id"], dest)
+                            imaging.upright(dest)
                             w, h = _dims(dest)
                             pid = store.add_photo(db, filename=fname, orig_name=media.get("filename"),
                                                   source="whatsapp", uploader=name, uploader_wa=sender,
@@ -162,6 +177,7 @@ async def api_upload(t: str = Form(""), uploader: str = Form("Family"),
         dest = os.path.join(store.MEDIA_DIR, fname)
         with open(dest, "wb") as out:
             out.write(raw)
+        imaging.upright(dest)
         w, h = _dims(dest)
         memory = event == config.MEMORY
         pid = store.add_photo(db, filename=fname, orig_name=f.filename,
@@ -363,6 +379,7 @@ def thumb(photo_id: str):
     if not os.path.exists(tpath):
         try:
             with Image.open(os.path.join(store.MEDIA_DIR, row["filename"])) as im:
+                im = ImageOps.exif_transpose(im)
                 im.thumbnail((480, 480))
                 im.convert("RGB").save(tpath, "JPEG", quality=82)
         except Exception:
