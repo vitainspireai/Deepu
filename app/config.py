@@ -24,9 +24,15 @@ FUNCTIONS = [
     ("reception", "Reception ✨", "Reception glam 📸"),
     ("other", "More 🌟", "Candid gold 🌟"),
 ]
-EVENTS = [k for k, _, _ in FUNCTIONS]
+# Memory Lane: old photos from past gatherings / earlier weddings. Stored as
+# event="throwback" but kept out of the live wedding grid and leaderboard.
+MEMORY = "throwback"
+MEMORY_LABEL = "Memory Lane 📜"
+
+EVENTS = [k for k, _, _ in FUNCTIONS] + [MEMORY]
 EVENT_LINES = {k: line for k, _, line in FUNCTIONS}
-EVENT_LABELS = [(k, label) for k, label, _ in FUNCTIONS]
+LIVE_LABELS = [(k, label) for k, label, _ in FUNCTIONS]          # upload dropdown
+EVENT_LABELS = LIVE_LABELS + [(MEMORY, MEMORY_LABEL)]            # album filter chips
 
 # Searching a name finds the AI's bride/groom tags too.
 SEARCH_ALIASES = {BRIDE.lower(): ["bride"], GROOM.lower(): ["groom"],

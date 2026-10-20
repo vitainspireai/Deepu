@@ -30,6 +30,15 @@ and Reception — edit the `FUNCTIONS` list to add or remove ceremonies
 - Anyone with the link can view. The token is long and unguessable; rotate
   it (new `GALLERY_TOKEN`) if a link leaks.
 
+## Memory Lane 📜
+
+Guests can also share **old photos** — past family gatherings, earlier
+weddings, any treasured moment. In **Add photos**, tick “This is an old
+memory”, add the year and a line of story, and upload. Memories live in
+their own **Memory Lane** tab (oldest first, like a timeline), appear every
+few slides on the TV, and never compete on the wedding leaderboard.
+Sharers earn a **Memory Keeper 📜** badge.
+
 ## The fun layer 👑 (the bit that fills the album)
 
 Built to turn "please share your photos" into a friendly family contest:

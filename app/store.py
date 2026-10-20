@@ -87,7 +87,7 @@ def connect():
     # migrate older databases
     cols = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
     for col, ctype in (("brightness", "REAL"), ("score", "REAL DEFAULT 0"),
-                       ("uploader_wa", "TEXT")):
+                       ("uploader_wa", "TEXT"), ("memory_year", "TEXT")):
         if col not in cols:
             db.execute(f"ALTER TABLE photos ADD COLUMN {col} {ctype}")
     db.commit()
@@ -99,14 +99,15 @@ def new_id():
 
 
 def add_photo(db, *, filename, orig_name, source, uploader, caption=None,
-              event=None, taken_at=None, width=None, height=None, uploader_wa=None):
+              event=None, taken_at=None, width=None, height=None, uploader_wa=None,
+              memory_year=None):
     pid = new_id()
     db.execute(
         "INSERT INTO photos (id, filename, orig_name, source, uploader, caption,"
-        " event, taken_at, created_at, width, height, uploader_wa)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        " event, taken_at, created_at, width, height, uploader_wa, memory_year)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (pid, filename, orig_name, source, uploader, caption, event,
-         taken_at or time.time(), time.time(), width, height, uploader_wa),
+         taken_at or time.time(), time.time(), width, height, uploader_wa, memory_year),
     )
     db.commit()
     return pid

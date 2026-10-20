@@ -134,7 +134,8 @@ async def webhook_receive(request: Request):
 # ------------------------------------------------------------------ web upload
 @app.post("/api/upload")
 async def api_upload(t: str = Form(""), uploader: str = Form("Family"),
-                     event: str = Form("other"), files: list[UploadFile] = File(...)):
+                     event: str = Form("other"), year: str = Form(""), story: str = Form(""),
+                     files: list[UploadFile] = File(...)):
     if not check_token(t):
         return JSONResponse({"error": "bad link"}, status_code=403)
     if event not in EVENTS:
@@ -153,11 +154,18 @@ async def api_upload(t: str = Form(""), uploader: str = Form("Family"),
         with open(dest, "wb") as out:
             out.write(raw)
         w, h = _dims(dest)
+        memory = event == config.MEMORY
         pid = store.add_photo(db, filename=fname, orig_name=f.filename,
                               source="web", uploader=uploader or "Family",
-                              event=event, width=w, height=h)
+                              event=event, width=w, height=h,
+                              caption=(story.strip()[:200] or None) if memory else None,
+                              memory_year=(re.sub(r"\D", "", year)[:4] or None) if memory else None)
         saved.append(pid)
-        results.append(announce_upload(db, pid, uploader or "Family"))
+        if memory:  # throwbacks aren't scored or ranked — they just join Memory Lane
+            results.append({"photo_id": pid, "memory": True,
+                            "badges": rank.award_memory_badge(db, uploader or "Family", time.time())})
+        else:
+            results.append(announce_upload(db, pid, uploader or "Family"))
     return {"saved": saved, "count": len(saved), "results": results}
 
 
@@ -186,6 +194,8 @@ def _select_photos(db, person="", event="", q="", uploader="", limit=300):
         sql += (" AND (" + " OR ".join(["pt.tag LIKE ?"] * len(like)) +
                 " OR p.caption LIKE ? OR p.uploader LIKE ?)")
         args += like + [like[0]] * 2
+    if not event:  # the live album never mixes in old memories
+        sql += f" AND COALESCE(p.event, '') != '{config.MEMORY}'"
     sql += " ORDER BY p.created_at DESC LIMIT ?"; args.append(limit)
     return db.execute(sql, args).fetchall()
 
@@ -218,7 +228,7 @@ def api_pulse(t: str = "", since: float = 0):
     db = store.connect()
     row = db.execute("SELECT COUNT(*) n, COALESCE(MAX(created_at), 0) latest FROM photos").fetchone()
     new = [dict(r) for r in db.execute(
-        "SELECT id, uploader, caption, created_at FROM photos WHERE created_at > ?"
+        "SELECT id, uploader, caption, created_at, event, memory_year FROM photos WHERE created_at > ?"
         " ORDER BY created_at LIMIT 20", (since,))]
     return {"count": row["n"], "latest": row["latest"],
             "applause": db.execute("SELECT COUNT(*) n FROM applause").fetchone()["n"],
@@ -364,7 +374,7 @@ def _render(tpl, **kw):
               "__EVENTS_JSON__": json.dumps([["", "All"]] + config.EVENT_LABELS),
               "__EVENT_OPTIONS__": "".join(
                   f'<option value="{k}"{" selected" if k == "wedding" else ""}>{escape(label)}</option>'
-                  for k, label in config.EVENT_LABELS),
+                  for k, label in config.LIVE_LABELS),
               "__CONFETTI__": CONFETTI_JS}
     values.update(kw)
     for k, v in values.items():
@@ -419,6 +429,8 @@ def photo_page(photo_id: str, request: Request):
         name = "a guest"
     who = escape(name)
     cap = escape(row["caption"] or "")
+    if row["event"] == config.MEMORY:
+        cap = escape(f"📜 Memory Lane{' · ' + row['memory_year'] if row['memory_year'] else ''}") + ("<br>" + cap if cap else "")
     og = _og(f"Photo by {name} 💛", row["caption"] or f"From {config.COUPLE}'s wedding",
              f"{origin}/thumb/{photo_id}", f"{origin}/p/{photo_id}")
     return HTMLResponse(_render(PHOTO_HTML, __OG__=og, __ID__=photo_id, __WHO__=who, __CAP__=cap))
@@ -492,13 +504,25 @@ body{padding-bottom:84px}
 #up select,#up input[type=file]{width:100%;padding:12px;font-size:16px;border-radius:10px;border:1px solid #6b4226;background:#1a1210;color:#fff;box-sizing:border-box}
 #up .btns{display:flex;gap:8px;margin-top:16px} #up .btns .act{flex:1;padding:13px;font-size:16px}
 #upmsg{margin-top:14px;font-size:15px;line-height:1.5}
+#up input[type=text]{width:100%;padding:12px;font-size:16px;border-radius:10px;border:1px solid #6b4226;background:#1a1210;color:#fff;box-sizing:border-box}
+.chk{display:flex;gap:10px;align-items:flex-start;margin-top:14px;padding:12px;border:1px dashed #f59e0b;border-radius:10px;font-size:14px;line-height:1.35;cursor:pointer}
+.chk input{width:20px;height:20px;margin:0;flex-shrink:0}
+#memhint{display:none;margin:0 12px 10px;padding:12px 14px;background:#3b241c;border:1px solid #6b4226;border-radius:12px;font-size:14px;line-height:1.45}
+.yr{position:relative;display:block}.yr img{display:block}
+.yr b{position:absolute;left:4px;bottom:4px;background:#000b;color:#fde68a;border-radius:6px;padding:2px 7px;font-size:12px}
 </style></head><body>
 <header><h1>🪔 __BRIDE__ ♥ __GROOM__</h1><div class="sub">__TAGLINE__</div><div class="sub"><span id="count"></span> · <a href="/tv/__TOKEN__" target="_blank">📺 TV mode</a></div></header>
 <div id="toast"></div>
 <button id="fab" onclick="openUp()">📸 Add photos</button>
 <div id="up" onclick="if(event.target===this)closeUp()"><div class="card">
 <h3>📸 Add your photos</h3><div style="opacity:.8;font-size:14px">Full quality — they appear in the album right away.</div>
-<label>Which function?</label><select id="upev">__EVENT_OPTIONS__</select>
+<label class="chk"><input type="checkbox" id="upmem" onchange="memToggle()">
+<span>📜 <b>This is an old memory</b> — from a past gathering, an earlier wedding, or any treasured family moment</span></label>
+<div id="livefields"><label>Which function?</label><select id="upev">__EVENT_OPTIONS__</select></div>
+<div id="memfields" style="display:none"><label>Which year? <small style="opacity:.7">(optional)</small></label>
+<input type="text" id="upyr" inputmode="numeric" maxlength="4" placeholder="e.g. 2015">
+<label>What's the story? <small style="opacity:.7">(optional)</small></label>
+<input type="text" id="upstory" maxlength="200" placeholder="e.g. Ravi Mama's wedding, Hyderabad"></div>
 <label>Photos</label><input type="file" id="upfiles" accept="image/*" multiple>
 <div class="btns"><button class="act" id="upgo" onclick="doUpload()">Upload</button>
 <button class="act" style="background:#3b241c;color:#ffd9a0" onclick="closeUp()">Close</button></div>
@@ -511,6 +535,7 @@ body{padding-bottom:84px}
 <div id="honor"></div>
 <input id="q" placeholder="Search: dancing, dhol, Deepu, Krishna, mehndi…">
 <div id="people"></div>
+<div id="memhint"></div>
 <div class="tools"><button class="act" onclick="slideshow()">▶ Play slideshow</button>
 <a class="tool" id="mine" onclick="toggleMine()" style="display:none">🙋 My photos</a>
 <a class="tool" id="zip" href="#">⬇ Download these (zip)</a>
@@ -576,8 +601,16 @@ async function load(){
   const mine=document.getElementById('mine');mine.style.display=getMe()?'':'none';
   mine.style.background=uploaderF?'#f59e0b':'';mine.style.color=uploaderF?'#1a1210':'';
   document.getElementById('sharep').style.display=person?'':'none';
-  document.getElementById('count').textContent=photos.length+" photos shared with blessings 🙏";
-  document.getElementById('grid').innerHTML=photos.map((p,i)=>`<img src="/thumb/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
+  document.getElementById('count').textContent=ev==='throwback'?photos.length+" memories treasured 📜":photos.length+" photos shared with blessings 🙏";
+  const mem=ev==='throwback';
+  if(mem){photos.sort((a,b)=>(a.memory_year||'9999').localeCompare(b.memory_year||'9999')||a.created_at-b.created_at); // oldest first, like a timeline
+    if(lbOpen&&curId){const i=photos.findIndex(p=>p.id===curId);cur=i>=0?i:0}}
+  const hint=document.getElementById('memhint');hint.style.display=mem?'block':'none';
+  hint.innerHTML='📜 <b>Memory Lane</b> — photos from past gatherings and earlier weddings, oldest first. Tap <b>Add photos</b> and tick “old memory” to share yours.';
+  document.getElementById('grid').innerHTML=photos.map((p,i)=>mem
+    ?`<span class="yr" onclick="openLb(${i})"><img src="/thumb/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
+    :`<img src="/thumb/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
+  if(mem&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No memories yet — be the first to share one! 📜</div>';
   document.getElementById('people').innerHTML=d.people.map(p=>`<div class="person" onclick="setPerson('${p.id}')">
     <img src="/thumb/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
   document.getElementById('events').innerHTML=EV.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
@@ -591,7 +624,7 @@ document.getElementById('q').addEventListener('input',()=>{clearTimeout(window._
 function openLb(i){cur=i;const p=photos[i];if(!p)return;document.getElementById('lb').style.display='flex';
   document.getElementById('lbimg').src='/media/'+p.id;
   document.getElementById('clapn').textContent=p.applause||0;
-  document.getElementById('cap').textContent=(p.caption||'')+`  ·  shared by ${disp(p.uploader)}  ·  score ${Math.round(p.score||0)}`;
+  document.getElementById('cap').textContent=p.event==='throwback'?`📜 ${p.memory_year?p.memory_year+' — ':''}${p.caption||'A treasured memory'}  ·  shared by ${disp(p.uploader)}`:(p.caption||'')+`  ·  shared by ${disp(p.uploader)}  ·  score ${Math.round(p.score||0)}`;
   document.getElementById('washare').href='https://wa.me/?text='+encodeURIComponent('From the wedding 💛 '+location.origin+'/p/'+p.id);
   document.getElementById('dl').href='/media/'+p.id+'?dl=1';
   shareFile=null;fetch('/media/'+p.id).then(r=>r.blob()).then(b=>{
@@ -608,24 +641,27 @@ function slideshow(){if(!photos.length)return;openLb(0);timer=setInterval(()=>{c
 function stopShow(){if(timer)clearInterval(timer);timer=null}
 document.getElementById('lbimg').addEventListener('click',e=>{const r=e.target.getBoundingClientRect();
   cur=(cur+(e.clientX>r.left+r.width/2?1:-1)+photos.length)%photos.length;openLb(cur)});
+function memToggle(){const m=document.getElementById('upmem').checked;
+  document.getElementById('livefields').style.display=m?'none':'';document.getElementById('memfields').style.display=m?'':'none'}
 function openUp(){document.getElementById('upmsg').innerHTML='';document.getElementById('up').style.display='flex'}
 function closeUp(){document.getElementById('up').style.display='none'}
 async function doUpload(){
   const msg=document.getElementById('upmsg'), inp=document.getElementById('upfiles'), go=document.getElementById('upgo');
   const files=[...inp.files]; if(!files.length){msg.textContent='Pick some photos first 🙂';return}
-  const ev=document.getElementById('upev').value, gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
+  const isMem=document.getElementById('upmem').checked, ev=isMem?'throwback':document.getElementById('upev').value, gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
   let ok=0,best=null,badges=[],crown=false; go.disabled=true;
   for(let i=0;i<files.length;i+=BATCH){
     const fd=new FormData();fd.append('t',T);fd.append('uploader',gid);fd.append('event',ev);
+    if(isMem){fd.append('year',document.getElementById('upyr').value);fd.append('story',document.getElementById('upstory').value)}
     files.slice(i,i+BATCH).forEach(f=>fd.append('files',f));
     msg.textContent=`Uploading ${Math.min(i+BATCH,files.length)} of ${files.length}… ⚡`;
     try{const d=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
-      (d.results||[]).forEach(r=>{ok++;if(!best||r.position<best.position)best=r;badges.push(...r.badges);if(r.crown)crown=true})}catch(e){}
+      (d.results||[]).forEach(r=>{ok++;if(!r.memory&&(!best||r.position<best.position))best=r;badges.push(...r.badges);if(r.crown)crown=true})}catch(e){}
   }
   go.disabled=false;inp.value='';
   if(!ok){msg.textContent='Something went wrong — please try again.';return}
-  const head=crown?'👑👑👑 CROWN TAKEN! One of your photos is #1!':best.position<=3?`${['🥇','🥈','🥉'][best.position-1]} On the podium — your best is #${best.position}!`:`✅ ${ok} photo${ok>1?'s':''} added — your best is ranked #${best.position}.`;
-  msg.innerHTML=head+`<br><small>${best.reason}</small>`+(badges.length?`<br>🏅 New badge: ${[...new Set(badges)].join(', ')}`:'')+(ok<files.length?`<br>⚠️ ${files.length-ok} file(s) couldn't be added.`:'');
+  const head=isMem?`📜 ${ok} memor${ok>1?'ies':'y'} added to Memory Lane — thank you for sharing!`:crown?'👑👑👑 CROWN TAKEN! One of your photos is #1!':best.position<=3?`${['🥇','🥈','🥉'][best.position-1]} On the podium — your best is #${best.position}!`:`✅ ${ok} photo${ok>1?'s':''} added — your best is ranked #${best.position}.`;
+  msg.innerHTML=head+(best&&!isMem?`<br><small>${best.reason}</small>`:'')+(badges.length?`<br>🏅 New badge: ${[...new Set(badges)].join(', ')}`:'')+(ok<files.length?`<br>⚠️ ${files.length-ok} file(s) couldn't be added.`:'');
   if(crown)confetti();
   load();loadTop3();
 }
@@ -634,7 +670,7 @@ async function pulse(){
   try{const d=await (await fetch(`/api/pulse?t=${T}&since=${since}`)).json();
     const s=d.count+'|'+d.applause+'|'+d.leader;
     if(sig!==null&&s!==sig){
-      if(d.new.length){const n=d.new[d.new.length-1];toast(`📸 New photo from ${disp(n.uploader)}!`)}
+      if(d.new.length){const n=d.new[d.new.length-1];toast(n.event==='throwback'?`📜 New memory from ${disp(n.uploader)}!`:`📸 New photo from ${disp(n.uploader)}!`)}
       load();loadTop3()}
     if(lastLeader!==null&&d.leader&&d.leader!==lastLeader){confetti();toast('👑 A new photo just took the crown!')}
     sig=s;lastLeader=d.leader;since=d.now}catch(e){}}
@@ -730,25 +766,31 @@ html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui;
 <div id="crown">👑 NEW #1!<br><small style="font-size:4vh">A photo just took the crown</small></div>
 __CONFETTI__
 <script>
-const T="__TOKEN__", SHOW_MS=6000; let queue=[], seen=new Set(), idx=0, front=true, since=0, leader=null, fresh=[];
+const T="__TOKEN__", SHOW_MS=6000; let queue=[], memQ=[], mi=0, slides=0, seen=new Set(), idx=0, front=true, since=0, leader=null, fresh=[];
 document.getElementById('url').textContent=location.host+'/upload';
 const L={a:document.getElementById('a'),b:document.getElementById('b')};
-function show(p,isNew){const el=front?L.a:L.b, old=front?L.b:L.a; front=!front;
+function show(p,mode){const el=front?L.a:L.b, old=front?L.b:L.a; front=!front;
   const u='/media/'+p.id; const im=new Image(); im.onload=()=>{el.style.backgroundImage=`url(${u})`;
     document.getElementById('bg').style.backgroundImage=`url(${u})`;
     el.classList.add('on');old.classList.remove('on')}; im.src=u;
-  const u=p.uploader;document.getElementById('cap').textContent='📸 '+(!u||/^Guest [0-9A-F]{4}$/.test(u)?'a guest':u)+(p.caption?' — '+p.caption:'');
-  document.getElementById('new').style.display=isNew?'block':'none';}
+  const who=p.uploader, name=!who||/^Guest [0-9A-F]{4}$/.test(who)?'a guest':who, nb=document.getElementById('new');
+  document.getElementById('cap').textContent=p.event==='throwback'
+    ?`📜 ${p.memory_year?p.memory_year+' — ':''}${p.caption||'A treasured memory'} · shared by ${name}`
+    :'📸 '+name+(p.caption?' — '+p.caption:'');
+  nb.textContent=mode==='mem'?'📜 MEMORY LANE':'📸 JUST IN!';nb.style.display=mode?'block':'none';}
 function next(){ // newly arrived photos jump the queue
-  if(fresh.length){show(fresh.shift(),true);return}
+  if(fresh.length){show(fresh.shift(),'new');return}
+  if(memQ.length&&++slides%5===0){show(memQ[mi++%memQ.length],'mem');return}  // every 5th slide: a throwback
   if(!queue.length)return; show(queue[idx%queue.length],false); idx++}
-async function loadAll(){const d=await (await fetch(`/api/photos?t=${T}&limit=1000`)).json();
+async function loadAll(){
+  const m=await (await fetch(`/api/photos?t=${T}&event=throwback&limit=500`)).json();m.photos.forEach(p=>seen.add(p.id));memQ=m.photos;
+  const d=await (await fetch(`/api/photos?t=${T}&limit=1000`)).json();
   d.photos.forEach(p=>seen.add(p.id));
   const a=d.photos.slice();for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]]}queue=a}
 async function loadTop(){const d=await (await fetch(`/api/top3?t=${T}`)).json();
   document.getElementById('pods').innerHTML=(d.podiums.overall||[]).map(p=>`<div class="pod"><img src="/thumb/${p.id}"><div><b>${p.medal}</b> ${p.applause||0} 👏</div></div>`).join('')}
 async function pulse(){try{const d=await (await fetch(`/api/pulse?t=${T}&since=${since}`)).json();
-  if(since){d.new.forEach(p=>{if(!seen.has(p.id)){seen.add(p.id);fresh.push(p);queue.push(p)}});
+  if(since){d.new.forEach(p=>{if(!seen.has(p.id)){seen.add(p.id);if(p.event==='throwback')memQ.push(p);else{fresh.push(p);queue.push(p)}}});
     if(fresh.length&&timerDue()){clearTimeout(tm);tick()}
     if(leader&&d.leader&&d.leader!==leader){confetti(220);const c=document.getElementById('crown');c.style.display='flex';setTimeout(()=>c.style.display='none',5000);loadTop()}
     if(d.new.length)loadTop()}

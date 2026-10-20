@@ -7,7 +7,9 @@ for #1.
 """
 import time
 
-from .config import EVENT_LINES
+from .config import EVENT_LINES, MEMORY
+
+LIVE = f"COALESCE(event, '') != '{MEMORY}'"   # memories never compete
 
 TAG_BONUS = {"dancing": 8, "candid laughing": 7, "baraat": 6, "bride": 5,
              "groom": 5, "couple": 6, "decorations": 4, "selfie": 3,
@@ -93,10 +95,10 @@ def rescore(db, photo_id):
 def leader_id(db, exclude=None):
     order = "ORDER BY score DESC, created_at DESC LIMIT 1"
     if exclude:
-        r = db.execute(f"SELECT id FROM photos WHERE id != ? {order}",
+        r = db.execute(f"SELECT id FROM photos WHERE id != ? AND {LIVE} {order}",
                        (exclude,)).fetchone()
     else:
-        r = db.execute(f"SELECT id FROM photos {order}").fetchone()
+        r = db.execute(f"SELECT id FROM photos WHERE {LIVE} {order}").fetchone()
     return r["id"] if r else None
 
 
@@ -126,14 +128,14 @@ def _cat_score(db, photo_id, wanted, solo_bonus_tags=None):
 def podium(db, category, n=3):
     if category == "overall":
         rows = db.execute(
-            "SELECT id FROM photos WHERE score > 0 ORDER BY score DESC, created_at DESC LIMIT ?",
+            f"SELECT id FROM photos WHERE score > 0 AND {LIVE} ORDER BY score DESC, created_at DESC LIMIT ?",
             (n,)).fetchall()
         ids = [r["id"] for r in rows]
     else:
         wanted = {"best_dressed": OUTFIT_TAGS, "couple": COUPLE_TAGS,
                   "candid": CANDID_TAGS}[category]
         cand = []
-        for r in db.execute("SELECT id FROM photos").fetchall():
+        for r in db.execute(f"SELECT id FROM photos WHERE {LIVE}").fetchall():
             cs = _cat_score(db, r["id"], wanted, solo_bonus_tags=True)
             tags = _tags(db, r["id"])
             if cs > 10 and (wanted & set(tags) or category == "candid"):
@@ -152,10 +154,10 @@ def podium(db, category, n=3):
 
 def cover_of_the_day(db, day_start_epoch):
     r = db.execute(
-        "SELECT * FROM photos WHERE created_at >= ? ORDER BY score DESC, created_at DESC LIMIT 1",
+        f"SELECT * FROM photos WHERE created_at >= ? AND {LIVE} ORDER BY score DESC, created_at DESC LIMIT 1",
         (day_start_epoch,)).fetchone()
     if not r:
-        r = db.execute("SELECT * FROM photos ORDER BY score DESC, created_at DESC LIMIT 1").fetchone()
+        r = db.execute(f"SELECT * FROM photos WHERE {LIVE} ORDER BY score DESC, created_at DESC LIMIT 1").fetchone()
     return dict(r) if r else None
 
 
@@ -171,10 +173,10 @@ def award_badges(db, uploader, photo_id, now, day_start, hour):
             db.execute("INSERT OR IGNORE INTO badges VALUES (?,?,?)",
                        (uploader, badge, now))
             earned.append(badge)
-    total = db.execute("SELECT COUNT(*) n FROM photos WHERE uploader = ?",
+    total = db.execute(f"SELECT COUNT(*) n FROM photos WHERE uploader = ? AND {LIVE}",
                        (uploader,)).fetchone()["n"]
     today_first = db.execute(
-        "SELECT COUNT(*) n FROM photos WHERE created_at >= ? AND id != ?",
+        f"SELECT COUNT(*) n FROM photos WHERE created_at >= ? AND id != ? AND {LIVE}",
         (day_start, photo_id)).fetchone()["n"] == 0
     if total == 1:
         give("Shaadi Debut 📸")
@@ -193,3 +195,11 @@ def award_badges(db, uploader, photo_id, now, day_start, hour):
         give("Crown Holder 👑")
     db.commit()
     return earned
+
+
+def award_memory_badge(db, uploader, now):
+    """'Memory Keeper' for the first throwback a guest shares. Returns [badge] if new."""
+    badge = "Memory Keeper 📜"
+    cur = db.execute("INSERT OR IGNORE INTO badges VALUES (?,?,?)", (uploader, badge, now))
+    db.commit()
+    return [badge] if cur.rowcount else []
