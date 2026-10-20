@@ -33,6 +33,7 @@ EVENTS = [k for k, _, _ in FUNCTIONS] + [MEMORY]
 EVENT_LINES = {k: line for k, _, line in FUNCTIONS}
 LIVE_LABELS = [(k, label) for k, label, _ in FUNCTIONS]          # upload dropdown
 EVENT_LABELS = LIVE_LABELS + [(MEMORY, MEMORY_LABEL)]            # album filter chips
+UPLOAD_LABELS = LIVE_LABELS + [(MEMORY, "📜 Old memory (past gathering / earlier wedding)")]  # Add-photos dropdown
 
 # Searching a name finds the AI's bride/groom tags too.
 SEARCH_ALIASES = {BRIDE.lower(): ["bride"], GROOM.lower(): ["groom"],

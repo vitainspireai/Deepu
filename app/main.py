@@ -26,6 +26,15 @@ from . import config, rank, store, wa
 from .ai_worker import analyze_one
 
 app = FastAPI(title="Wedding Photo Share")
+
+
+@app.middleware("http")
+async def no_cache_pages(request: Request, call_next):
+    """HTML pages embed the live function list and settings — never serve a stale copy."""
+    resp = await call_next(request)
+    if resp.headers.get("content-type", "").startswith("text/html"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
 EVENTS = config.EVENTS
 TZ = ZoneInfo(os.environ.get("EVENT_TZ", "America/Chicago"))
 
@@ -366,15 +375,19 @@ def home():
     return HTMLResponse(f'<meta http-equiv="refresh" content="0;url=/g/{quote(wa.GALLERY_TOKEN, safe="/+=")}">')
 
 
+def _options(labels):
+    return "".join(f'<option value="{k}"{" selected" if k == "wedding" else ""}>{escape(label)}</option>'
+                   for k, label in labels)
+
+
 def _render(tpl, **kw):
     """Fill the page placeholders: couple names, tagline, functions, plus extras."""
     import json
     values = {"__BRIDE__": escape(config.BRIDE), "__GROOM__": escape(config.GROOM),
               "__COUPLE__": escape(config.COUPLE), "__TAGLINE__": escape(config.TAGLINE),
               "__EVENTS_JSON__": json.dumps([["", "All"]] + config.EVENT_LABELS),
-              "__EVENT_OPTIONS__": "".join(
-                  f'<option value="{k}"{" selected" if k == "wedding" else ""}>{escape(label)}</option>'
-                  for k, label in config.LIVE_LABELS),
+              "__EVENT_OPTIONS__": _options(config.LIVE_LABELS),
+              "__UPLOAD_OPTIONS__": _options(config.UPLOAD_LABELS),
               "__CONFETTI__": CONFETTI_JS}
     values.update(kw)
     for k, v in values.items():
@@ -514,11 +527,9 @@ body{padding-bottom:84px}
 <header><h1>🪔 __BRIDE__ ♥ __GROOM__</h1><div class="sub">__TAGLINE__</div><div class="sub"><span id="count"></span> · <a href="/tv/__TOKEN__" target="_blank">📺 TV mode</a></div></header>
 <div id="toast"></div>
 <button id="fab" onclick="openUp()">📸 Add photos</button>
-<div id="up" onclick="if(event.target===this)closeUp()"><div class="card">
+<div id="up" onclick="if(event.target===this)closeUp()"><div class="card" autocomplete="off">
 <h3>📸 Add your photos</h3><div style="opacity:.8;font-size:14px">Full quality — they appear in the album right away.</div>
-<label class="chk"><input type="checkbox" id="upmem" onchange="memToggle()">
-<span>📜 <b>This is an old memory</b> — from a past gathering, an earlier wedding, or any treasured family moment</span></label>
-<div id="livefields"><label>Which function?</label><select id="upev">__EVENT_OPTIONS__</select></div>
+<label>What are you sharing?</label><select id="upev" onchange="memToggle()">__UPLOAD_OPTIONS__</select>
 <div id="memfields" style="display:none"><label>Which year? <small style="opacity:.7">(optional)</small></label>
 <input type="text" id="upyr" inputmode="numeric" maxlength="4" placeholder="e.g. 2015">
 <label>What's the story? <small style="opacity:.7">(optional)</small></label>
@@ -641,17 +652,18 @@ function slideshow(){if(!photos.length)return;openLb(0);timer=setInterval(()=>{c
 function stopShow(){if(timer)clearInterval(timer);timer=null}
 document.getElementById('lbimg').addEventListener('click',e=>{const r=e.target.getBoundingClientRect();
   cur=(cur+(e.clientX>r.left+r.width/2?1:-1)+photos.length)%photos.length;openLb(cur)});
-function memToggle(){const m=document.getElementById('upmem').checked;
-  document.getElementById('livefields').style.display=m?'none':'';document.getElementById('memfields').style.display=m?'':'none'}
-function openUp(){document.getElementById('upmsg').innerHTML='';document.getElementById('up').style.display='flex'}
+function memToggle(){document.getElementById('memfields').style.display=document.getElementById('upev').value==='throwback'?'':'none'}
+function openUp(){const sel=document.getElementById('upev'); // start on the tab you're looking at, never a stale choice
+  sel.value=[...sel.options].some(o=>o.value===ev&&ev)?ev:'wedding';memToggle();
+  document.getElementById('upfiles').value='';document.getElementById('upmsg').innerHTML='';document.getElementById('up').style.display='flex'}
 function closeUp(){document.getElementById('up').style.display='none'}
 async function doUpload(){
   const msg=document.getElementById('upmsg'), inp=document.getElementById('upfiles'), go=document.getElementById('upgo');
   const files=[...inp.files]; if(!files.length){msg.textContent='Pick some photos first 🙂';return}
-  const isMem=document.getElementById('upmem').checked, ev=isMem?'throwback':document.getElementById('upev').value, gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
+  const evSel=document.getElementById('upev').value, isMem=evSel==='throwback', gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
   let ok=0,best=null,badges=[],crown=false; go.disabled=true;
   for(let i=0;i<files.length;i+=BATCH){
-    const fd=new FormData();fd.append('t',T);fd.append('uploader',gid);fd.append('event',ev);
+    const fd=new FormData();fd.append('t',T);fd.append('uploader',gid);fd.append('event',evSel);
     if(isMem){fd.append('year',document.getElementById('upyr').value);fd.append('story',document.getElementById('upstory').value)}
     files.slice(i,i+BATCH).forEach(f=>fd.append('files',f));
     msg.textContent=`Uploading ${Math.min(i+BATCH,files.length)} of ${files.length}… ⚡`;
