@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: wedding-photo-share
+    name: deepu-krishna
     env: python
     plan: starter          # free plan has no persistent disk — photos would be wiped on restart
     buildCommand: pip install -r requirements.txt
