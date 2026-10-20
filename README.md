@@ -8,7 +8,7 @@ photos to, one link to view them all.**
 
 Names, tagline and the list of functions live in `app/config.py`
 (`BRIDE_NAME`, `GROOM_NAME`, `TAGLINE` can also be set in `.env`). The
-functions are Engagement, Haldi, Mehndi, Sangeet, Baraat, Wedding, Vidaai
+functions are Engagement, Pelli Kuthuru, Haldi, Mehndi, Sangeet, Baraat, Wedding, Vidaai
 and Reception — edit the `FUNCTIONS` list to add or remove ceremonies
 (e.g. Nalugu, Griha Pravesh), but don't rename a key once photos exist.
 

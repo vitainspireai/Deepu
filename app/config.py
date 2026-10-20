@@ -15,6 +15,7 @@ TAGLINE = os.environ.get("TAGLINE", "Shubh Vivah 🪔")
 # existing keys once photos have been uploaded.
 FUNCTIONS = [
     ("engagement", "Engagement 💍", "Ring-ceremony sparkle 💍"),
+    ("pelli_kuthuru", "Pelli Kuthuru 🌼", "Pelli Kuthuru blessings — turmeric, tradition and family love 🌼"),
     ("haldi", "Haldi 💛", "Haldi glow detected ✨"),
     ("mehndi", "Mehndi 🪔", "Mehndi magic, rachne wali hai 🪔"),
     ("sangeet", "Sangeet 💃", "Sangeet energy is contagious 💃"),
