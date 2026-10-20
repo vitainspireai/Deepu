@@ -1,0 +1,6 @@
+# Heavier AI features (face grouping + smart search tags).
+# Install on the server, not needed for the core app.
+insightface
+onnxruntime
+open_clip_torch
+torch --index-url https://download.pytorch.org/whl/cpu
