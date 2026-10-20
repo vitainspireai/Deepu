@@ -633,17 +633,18 @@ document.getElementById('msg').innerHTML=d.results.map(res=>
 
 
 CONFETTI_JS = r"""
-function confetti(n){n=n||140;const c=document.createElement('canvas');
+function confetti(n){n=n||140;const c=document.createElement('canvas'); // phoolon ki barish: a shower of petals
   c.style.cssText='position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:99';
   document.body.appendChild(c);const x=c.getContext('2d');c.width=innerWidth;c.height=innerHeight;
-  const cols=['#f59e0b','#ef4444','#ec4899','#22c55e','#3b82f6','#fde68a'];
+  const cols=['#f59e0b','#fbbf24','#ea580c','#f97316','#e11d48','#fb7185','#fde68a','#d97706'];
   const ps=Array.from({length:n},()=>({x:Math.random()*c.width,y:-20-Math.random()*c.height*.4,
-    vx:(Math.random()-.5)*4,vy:2+Math.random()*4,s:5+Math.random()*7,r:Math.random()*6,vr:(Math.random()-.5)*.3,
-    col:cols[(Math.random()*cols.length)|0]}));
+    vx:(Math.random()-.5)*3,vy:1.5+Math.random()*3,s:6+Math.random()*8,r:Math.random()*6,vr:(Math.random()-.5)*.2,
+    sw:Math.random()*6,col:cols[(Math.random()*cols.length)|0]}));
   let f=0;(function tick(){x.clearRect(0,0,c.width,c.height);
-    ps.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.05;p.r+=p.vr;x.save();x.translate(p.x,p.y);x.rotate(p.r);
-      x.fillStyle=p.col;x.fillRect(-p.s/2,-p.s/3,p.s,p.s*.6);x.restore()});
-    if(++f<260)requestAnimationFrame(tick);else c.remove()})()}
+    ps.forEach(p=>{p.sw+=.06;p.x+=p.vx+Math.sin(p.sw)*1.2;p.y+=p.vy;p.r+=p.vr;x.save();x.translate(p.x,p.y);x.rotate(p.r);
+      x.fillStyle=p.col;x.beginPath();x.ellipse(0,0,p.s,p.s*.5,0,0,6.283);x.fill();
+      x.fillStyle='#ffffff33';x.beginPath();x.ellipse(-p.s*.2,0,p.s*.5,p.s*.18,0,0,6.283);x.fill();x.restore()});
+    if(++f<300)requestAnimationFrame(tick);else c.remove()})()}
 """
 
 PHOTO_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
