@@ -101,8 +101,7 @@ async def webhook_receive(request: Request):
                             badge_line = "".join(f"\n🏅 New badge: {b}" for b in res["badges"])
                             wa.send_text(sender,
                                          f"{line1}{badge_line}\n"
-                                         f"See the live leaderboard: {wa.gallery_link()}\n"
-                                         f"Full-quality uploads: {wa.upload_link()}")
+                                         f"See the live leaderboard & add full-quality photos: {wa.gallery_link()}")
                             if res["dethroned_id"]:
                                 old = db.execute("SELECT uploader, uploader_wa FROM photos WHERE id = ?",
                                                  (res["dethroned_id"],)).fetchone()
@@ -126,8 +125,7 @@ async def webhook_receive(request: Request):
                         try:
                             wa.send_text(sender,
                                          f"Namaste! 🙏 Send me your photos from {config.COUPLE}'s wedding and I'll add them to the family album. 🪔\n"
-                                         f"📸 View & play all photos: {wa.gallery_link()}\n"
-                                         f"⬆️ Upload full-quality photos: {wa.upload_link()}")
+                                         f"📸 View all photos, and tap “Add photos” to upload full-quality ones: {wa.gallery_link()}")
                         except Exception as e:
                             print("reply failed:", e)
     return {"status": "ok"}
@@ -485,9 +483,26 @@ a.dl{background:#3b241c;color:#ffd9a0;text-decoration:none;border-radius:8px;pad
 .tools{display:flex;gap:8px;flex-wrap:wrap;padding:0 12px 10px}
 a.tool{display:inline-block;background:#3b241c;color:#ffd9a0;border:1px solid #6b4226;border-radius:8px;padding:10px 14px;font-weight:600;text-decoration:none;font-size:15px;cursor:pointer}
 header a{color:#fff;font-size:13px;opacity:.9}
+body{padding-bottom:84px}
+#fab{position:fixed;right:16px;bottom:18px;z-index:8;background:#f59e0b;color:#1a1210;border:0;border-radius:99px;
+ padding:15px 22px;font-size:17px;font-weight:800;box-shadow:0 6px 20px #000a;cursor:pointer}
+#up{position:fixed;inset:0;background:#000c;display:none;align-items:flex-end;justify-content:center;z-index:15}
+#up .card{background:#241612;border:1px solid #6b4226;border-radius:18px 18px 0 0;padding:20px;width:100%;max-width:480px;box-sizing:border-box}
+#up h3{margin:0 0 4px;font-size:19px} #up label{display:block;margin:14px 0 6px;font-weight:600;font-size:14px}
+#up select,#up input[type=file]{width:100%;padding:12px;font-size:16px;border-radius:10px;border:1px solid #6b4226;background:#1a1210;color:#fff;box-sizing:border-box}
+#up .btns{display:flex;gap:8px;margin-top:16px} #up .btns .act{flex:1;padding:13px;font-size:16px}
+#upmsg{margin-top:14px;font-size:15px;line-height:1.5}
 </style></head><body>
 <header><h1>🪔 __BRIDE__ ♥ __GROOM__</h1><div class="sub">__TAGLINE__</div><div class="sub"><span id="count"></span> · <a href="/tv/__TOKEN__" target="_blank">📺 TV mode</a></div></header>
 <div id="toast"></div>
+<button id="fab" onclick="openUp()">📸 Add photos</button>
+<div id="up" onclick="if(event.target===this)closeUp()"><div class="card">
+<h3>📸 Add your photos</h3><div style="opacity:.8;font-size:14px">Full quality — they appear in the album right away.</div>
+<label>Which function?</label><select id="upev">__EVENT_OPTIONS__</select>
+<label>Photos</label><input type="file" id="upfiles" accept="image/*" multiple>
+<div class="btns"><button class="act" id="upgo" onclick="doUpload()">Upload</button>
+<button class="act" style="background:#3b241c;color:#ffd9a0" onclick="closeUp()">Close</button></div>
+<div id="upmsg"></div></div></div>
 <div id="cover"></div>
 <div class="bar" id="events"></div>
 <div style="padding:10px 12px 0;font-size:18px;font-weight:700">🏆 Leaderboard <small style="font-weight:400;opacity:.75">updates the second anyone uploads!</small></div>
@@ -593,6 +608,27 @@ function slideshow(){if(!photos.length)return;openLb(0);timer=setInterval(()=>{c
 function stopShow(){if(timer)clearInterval(timer);timer=null}
 document.getElementById('lbimg').addEventListener('click',e=>{const r=e.target.getBoundingClientRect();
   cur=(cur+(e.clientX>r.left+r.width/2?1:-1)+photos.length)%photos.length;openLb(cur)});
+function openUp(){document.getElementById('upmsg').innerHTML='';document.getElementById('up').style.display='flex'}
+function closeUp(){document.getElementById('up').style.display='none'}
+async function doUpload(){
+  const msg=document.getElementById('upmsg'), inp=document.getElementById('upfiles'), go=document.getElementById('upgo');
+  const files=[...inp.files]; if(!files.length){msg.textContent='Pick some photos first 🙂';return}
+  const ev=document.getElementById('upev').value, gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
+  let ok=0,best=null,badges=[],crown=false; go.disabled=true;
+  for(let i=0;i<files.length;i+=BATCH){
+    const fd=new FormData();fd.append('t',T);fd.append('uploader',gid);fd.append('event',ev);
+    files.slice(i,i+BATCH).forEach(f=>fd.append('files',f));
+    msg.textContent=`Uploading ${Math.min(i+BATCH,files.length)} of ${files.length}… ⚡`;
+    try{const d=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
+      (d.results||[]).forEach(r=>{ok++;if(!best||r.position<best.position)best=r;badges.push(...r.badges);if(r.crown)crown=true})}catch(e){}
+  }
+  go.disabled=false;inp.value='';
+  if(!ok){msg.textContent='Something went wrong — please try again.';return}
+  const head=crown?'👑👑👑 CROWN TAKEN! One of your photos is #1!':best.position<=3?`${['🥇','🥈','🥉'][best.position-1]} On the podium — your best is #${best.position}!`:`✅ ${ok} photo${ok>1?'s':''} added — your best is ranked #${best.position}.`;
+  msg.innerHTML=head+`<br><small>${best.reason}</small>`+(badges.length?`<br>🏅 New badge: ${[...new Set(badges)].join(', ')}`:'')+(ok<files.length?`<br>⚠️ ${files.length-ok} file(s) couldn't be added.`:'');
+  if(crown)confetti();
+  load();loadTop3();
+}
 let sig=null, lastLeader=null, since=0;
 async function pulse(){
   try{const d=await (await fetch(`/api/pulse?t=${T}&since=${since}`)).json();

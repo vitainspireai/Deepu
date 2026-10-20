@@ -26,7 +26,8 @@ git push -u origin main
 
 # 4. Family links:
 #    Album:  https://<service>.onrender.com/g/<GALLERY_TOKEN>
-#    Upload: https://<service>.onrender.com/upload?t=<GALLERY_TOKEN>
+#    (the album has an "Add photos" button, so this one link is all guests need;
+#     /upload?t=<GALLERY_TOKEN> still works as a direct upload page)
 ```
 
 Cancel/delete the service after the wedding and the bill stops.
