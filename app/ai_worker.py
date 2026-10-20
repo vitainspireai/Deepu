@@ -19,6 +19,7 @@ from PIL import Image, ImageFilter, ImageStat
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import store  # noqa: E402
+from app.imaging import open_small  # noqa: E402
 
 WEDDING_TAGS = ["bride", "groom", "couple", "romantic couple", "dancing",
                 "singing", "food", "cake cutting", "decorations", "flowers",
@@ -33,7 +34,7 @@ WEDDING_TAGS = ["bride", "groom", "couple", "romantic couple", "dancing",
 
 
 def ahash(path):
-    with Image.open(path) as im:
+    with open_small(path, (64, 64), "L") as im:   # never decode a huge photo at full size
         g = im.convert("L").resize((8, 8))
         px = list(g.getdata())
     avg = sum(px) / 64
@@ -41,7 +42,7 @@ def ahash(path):
 
 
 def blur_score(path):
-    with Image.open(path) as im:
+    with open_small(path, (1024, 1024), "L") as im:   # never decode a huge photo at full size
         g = im.convert("L")
         g.thumbnail((512, 512))
         edges = g.filter(ImageFilter.FIND_EDGES)
@@ -49,7 +50,7 @@ def blur_score(path):
 
 
 def brightness(path):
-    with Image.open(path) as im:
+    with open_small(path, (512, 512), "L") as im:   # never decode a huge photo at full size
         g = im.convert("L")
         g.thumbnail((256, 256))
         return ImageStat.Stat(g).mean[0]

@@ -11,7 +11,6 @@ import os
 import re
 import time
 import zipfile
-from contextlib import asynccontextmanager
 from datetime import datetime
 from html import escape
 from urllib.parse import quote
@@ -20,25 +19,12 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                StreamingResponse)
-from PIL import Image, ImageOps
+from PIL import Image
 
 from . import config, imaging, rank, store, wa
 from .ai_worker import analyze_one
 
-@asynccontextmanager
-async def lifespan(_app):
-    fixed = imaging.fix_existing(store.MEDIA_DIR, store.THUMB_DIR) if os.path.isdir(store.MEDIA_DIR) else []
-    if fixed:
-        db = store.connect()
-        for name in fixed:  # the stored sizes were for the sideways file
-            w, h = _dims(os.path.join(store.MEDIA_DIR, name))
-            db.execute("UPDATE photos SET width = ?, height = ? WHERE filename = ?", (w, h, name))
-        db.commit()
-        print(f"straightened {len(fixed)} sideways photo(s)")
-    yield
-
-
-app = FastAPI(title="Wedding Photo Share", lifespan=lifespan)
+app = FastAPI(title="Wedding Photo Share")
 
 
 @app.middleware("http")
@@ -111,7 +97,6 @@ async def webhook_receive(request: Request):
                         dest = os.path.join(store.MEDIA_DIR, fname)
                         try:
                             wa.download_media(media["id"], dest)
-                            imaging.upright(dest)
                             w, h = _dims(dest)
                             pid = store.add_photo(db, filename=fname, orig_name=media.get("filename"),
                                                   source="whatsapp", uploader=name, uploader_wa=sender,
@@ -176,7 +161,6 @@ async def api_upload(t: str = Form(""), uploader: str = Form("Family"),
         dest = os.path.join(store.MEDIA_DIR, fname)
         with open(dest, "wb") as out:
             out.write(raw)
-        imaging.upright(dest)
         w, h = _dims(dest)
         memory = event == config.MEMORY
         pid = store.add_photo(db, filename=fname, orig_name=f.filename,
@@ -395,21 +379,21 @@ def media(photo_id: str, dl: int = 0):
                         filename=(row["orig_name"] or row["filename"]) if dl else None)
 
 
-@app.get("/thumb/{photo_id}")
+@app.get("/t/{photo_id}")
+@app.get("/thumb/{photo_id}")   # old address, kept for links already shared
 def thumb(photo_id: str):
     db = store.connect()
     row = db.execute("SELECT filename FROM photos WHERE id = ?", (photo_id,)).fetchone()
     if not row:
         return PlainTextResponse("not found", status_code=404)
-    tpath = os.path.join(store.THUMB_DIR, row["filename"] + ".jpg")
+    src = os.path.join(store.MEDIA_DIR, row["filename"])
+    tpath = os.path.join(store.THUMB_DIR, row["filename"] + ".v2.jpg")   # v2: upright thumbnails
     if not os.path.exists(tpath):
         try:
-            with Image.open(os.path.join(store.MEDIA_DIR, row["filename"])) as im:
-                im = ImageOps.exif_transpose(im)
-                im.thumbnail((480, 480))
-                im.convert("RGB").save(tpath, "JPEG", quality=82)
-        except Exception:
-            return FileResponse(os.path.join(store.MEDIA_DIR, row["filename"]))
+            imaging.make_thumb(src, tpath)
+        except Exception as e:
+            print("thumbnail failed:", row["filename"], e)
+            return PlainTextResponse("thumbnail unavailable", status_code=503)
     return FileResponse(tpath)
 
 
@@ -468,7 +452,7 @@ def gallery(token: str, request: Request, person: str = ""):
         _, day_start, _ = _day()
         c = rank.cover_of_the_day(db, day_start)
         cover = c["id"] if c else None
-    og = _og(title, desc, f"{origin}/thumb/{cover}", f"{origin}{request.url.path}") if cover else ""
+    og = _og(title, desc, f"{origin}/t/{cover}", f"{origin}{request.url.path}") if cover else ""
     return HTMLResponse(_render(GALLERY_HTML, __TOKEN__=token, __OG__=og))
 
 
@@ -489,7 +473,7 @@ def photo_page(photo_id: str, request: Request):
     if row["event"] == config.MEMORY:
         cap = escape(f"📜 Memory Lane{' · ' + row['memory_year'] if row['memory_year'] else ''}") + ("<br>" + cap if cap else "")
     og = _og(f"Photo by {name} 💛", row["caption"] or f"From {config.COUPLE}'s wedding",
-             f"{origin}/thumb/{photo_id}", f"{origin}/p/{photo_id}")
+             f"{origin}/t/{photo_id}", f"{origin}/p/{photo_id}")
     return HTMLResponse(_render(PHOTO_HTML, __OG__=og, __ID__=photo_id, __WHO__=who, __CAP__=cap))
 
 
@@ -630,21 +614,21 @@ async function nameFace(id){
 async function loadTop3(){
   const d=await (await fetch(`/api/top3?t=${T}`)).json(); top3=d;
   const c=top3.cover;
-  document.getElementById('cover').innerHTML=c?`<img src="/thumb/${c.id}" onclick="openLbById('${c.id}')">
+  document.getElementById('cover').innerHTML=c?`<img src="/t/${c.id}" onclick="openLbById('${c.id}')">
     <div class="tag">📰 Cover of the Day — ${disp(c.uploader)}</div>`:'';
   const shownCats=CATS.filter(([k])=>k==='overall'||(top3.podiums[k]||[]).length);
   if(!shownCats.some(([k])=>k===cat))cat='overall';
   document.getElementById('cats').innerHTML=shownCats.map(([k,v])=>`<span class="chip ${cat===k?'on':''}" onclick="cat='${k}';loadTop3()">${v}</span>`).join("");
   const list=(top3.podiums[cat]||[]);
   document.getElementById('podiums').innerHTML=list.length?list.map(p=>`<div class="podium">
-    <img src="/thumb/${p.id}" onclick="openLbById('${p.id}')">
+    <img src="/t/${p.id}" onclick="openLbById('${p.id}')">
     <div class="body"><b>${p.medal} ${p.applause||0} 👏</b><div class="why">${p.reason||''}</div></div></div>`).join("")
     :'<div style="padding:12px;opacity:.7">No contenders yet — upload a photo and take the crown! 👑</div>';
   document.getElementById('honor').innerHTML=top3.honor_roll.length
     ? '🏅 <b>Honor Roll:</b> ' + top3.honor_roll.map(h=>`<span class="badge">${h.badge} — ${h.uploader}</span>`).join("")
     : '';
   document.getElementById('mystery').innerHTML=top3.mystery.length
-    ? top3.mystery.map(m=>`<div class="mys"><img src="/thumb/${m.cover_photo}"><div style="font-size:12px">in ${m.face_count} photos</div>
+    ? top3.mystery.map(m=>`<div class="mys"><img src="/t/${m.cover_photo}"><div style="font-size:12px">in ${m.face_count} photos</div>
        <input id="nm_${m.id}" placeholder="Who?"><br><button class="act" style="margin-top:4px;padding:5px 10px;font-size:13px" onclick="nameFace('${m.id}')">Say name</button></div>`).join("")
     : '';
   document.getElementById('guesswho').style.display=top3.mystery.length?'':'none';   // no faces found yet -> no empty game
@@ -666,13 +650,13 @@ async function load(){
   const hint=document.getElementById('memhint');hint.style.display=mem?'block':'none';
   hint.innerHTML='📜 <b>Memory Lane</b> — photos from past gatherings and earlier weddings, oldest first. Tap <b>Add photos</b> and tick “old memory” to share yours.';
   document.getElementById('grid').innerHTML=photos.map((p,i)=>mem
-    ?`<span class="yr" onclick="openLb(${i})"><img src="/thumb/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
-    :`<img src="/thumb/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
+    ?`<span class="yr" onclick="openLb(${i})"><img src="/t/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
+    :`<img src="/t/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
   if(mem&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No memories yet — be the first to share one! 📜</div>';
   document.getElementById('people').style.display=d.people.length?'':'none';
   document.getElementById('q').placeholder=d.smart_tags?'Search: dancing, dhol, Deepu, Krishna, mehndi…':'Search by caption or who shared it…';
   document.getElementById('people').innerHTML=d.people.map(p=>`<div class="person" onclick="setPerson('${p.id}')">
-    <img src="/thumb/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
+    <img src="/t/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
   document.getElementById('events').innerHTML=EV.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
 }
 function setEv(k){ev=k;person="";load()} function setPerson(id){person=person===id?"":id;load()}
@@ -849,7 +833,7 @@ async function loadAll(){
   d.photos.forEach(p=>seen.add(p.id));
   const a=d.photos.slice();for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]]}queue=a}
 async function loadTop(){const d=await (await fetch(`/api/top3?t=${T}`)).json();
-  document.getElementById('pods').innerHTML=(d.podiums.overall||[]).map(p=>`<div class="pod"><img src="/thumb/${p.id}"><div><b>${p.medal}</b> ${p.applause||0} 👏</div></div>`).join('')}
+  document.getElementById('pods').innerHTML=(d.podiums.overall||[]).map(p=>`<div class="pod"><img src="/t/${p.id}"><div><b>${p.medal}</b> ${p.applause||0} 👏</div></div>`).join('')}
 async function pulse(){try{const d=await (await fetch(`/api/pulse?t=${T}&since=${since}`)).json();
   if(since){d.new.forEach(p=>{if(!seen.has(p.id)){seen.add(p.id);if(p.event==='throwback')memQ.push(p);else{fresh.push(p);queue.push(p)}}});
     if(fresh.length&&timerDue()){clearTimeout(tm);tick()}

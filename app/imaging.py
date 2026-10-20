@@ -1,56 +1,31 @@
-"""Keep every photo upright.
+"""Small, memory-safe image helpers.
 
-Phones (iPhones especially) store pixels sideways and add an EXIF
-"Orientation" flag that says how to rotate on display. Browsers obey it but
-thumbnails, downloads and other apps often don't, so photos show up on their
-side. `upright()` bakes the rotation into the pixels and clears the flag.
+The server has 512 MB of RAM and an iPhone photo can take 150-300 MB once fully
+decoded, so nothing here decodes a photo at full size: JPEGs are decoded at a
+reduced scale ("draft" mode) and only the small result is processed.
+
+Original photos are stored exactly as uploaded. Phones save portrait shots
+sideways plus an EXIF "Orientation" flag; browsers honour that flag when showing
+the original, so only the thumbnails we generate need rotating.
 """
-import os
+import threading
 
 from PIL import Image, ImageOps
 
-ORIENTATION = 0x0112
+THUMB_SIZE = (480, 480)
+_thumb_slots = threading.BoundedSemaphore(2)   # an album page asks for dozens at once
 
 
-def upright(path):
-    """Rotate the photo's pixels to match its EXIF orientation. Returns True
-    if the file was rewritten. Photos that are already upright are untouched
-    (no re-encoding, no quality loss)."""
-    try:
-        with Image.open(path) as im:
-            if im.getexif().get(ORIENTATION, 1) in (None, 1):
-                return False
-            fmt = im.format or "JPEG"
-            fixed = ImageOps.exif_transpose(im)          # also drops the orientation flag
-            exif = fixed.getexif()
-            tmp = path + ".tmp"
-            if fmt == "JPEG":
-                fixed.convert("RGB").save(tmp, "JPEG", quality=95, exif=exif)
-            else:
-                fixed.save(tmp, fmt)
-        os.replace(tmp, path)
-        return True
-    except Exception as e:  # never lose an upload over a rotation problem
-        print("upright failed:", path, e)
-        try:
-            os.remove(path + ".tmp")
-        except OSError:
-            pass
-        return False
+def open_small(path, size, mode=None):
+    """Open a photo decoded no bigger than needed for `size` (cheap for JPEGs)."""
+    im = Image.open(path)
+    im.draft(mode or "RGB", size)     # JPEG: decode at 1/2, 1/4 or 1/8 scale; no-op otherwise
+    return im
 
 
-def fix_existing(media_dir, thumb_dir):
-    """One-off sweep for photos uploaded before this existed: rotate them and
-    drop their cached (sideways) thumbnails. Returns the file names it fixed.
-    Cheap when nothing needs fixing."""
-    fixed = []
-    for name in os.listdir(media_dir):
-        if name.endswith(".tmp"):
-            continue
-        if upright(os.path.join(media_dir, name)):
-            fixed.append(name)
-            try:
-                os.remove(os.path.join(thumb_dir, name + ".jpg"))
-            except OSError:
-                pass
-    return fixed
+def make_thumb(src, dst):
+    """Upright, small JPEG thumbnail. Shrink first, then rotate the small image."""
+    with _thumb_slots, open_small(src, THUMB_SIZE) as im:
+        im.thumbnail(THUMB_SIZE)                  # keeps the EXIF, so the flag is still readable
+        small = ImageOps.exif_transpose(im)       # rotate the 480px image, not the full photo
+        small.convert("RGB").save(dst, "JPEG", quality=82)
