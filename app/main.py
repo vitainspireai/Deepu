@@ -14,6 +14,7 @@ import time
 import zipfile
 from datetime import datetime
 from html import escape
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -30,7 +31,9 @@ TZ = ZoneInfo(os.environ.get("EVENT_TZ", "America/Chicago"))
 
 
 def check_token(t: str):
-    return t and t == wa.GALLERY_TOKEN
+    # Render's generated tokens are base64 and may contain '+', which a
+    # query string turns into a space — undo that before comparing.
+    return bool(t) and t.replace(" ", "+") == wa.GALLERY_TOKEN
 
 
 def _day():
@@ -352,7 +355,7 @@ def thumb(photo_id: str):
 # ---------------------------------------------------------------------- pages
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return HTMLResponse(f'<meta http-equiv="refresh" content="0;url=/g/{wa.GALLERY_TOKEN}">')
+    return HTMLResponse(f'<meta http-equiv="refresh" content="0;url=/g/{quote(wa.GALLERY_TOKEN, safe="/+=")}">')
 
 
 def _render(tpl, **kw):
@@ -382,7 +385,7 @@ def _origin(request: Request):
     return wa.BASE_URL or str(request.base_url).rstrip("/")
 
 
-@app.get("/g/{token}", response_class=HTMLResponse)
+@app.get("/g/{token:path}", response_class=HTMLResponse)   # :path — tokens may contain "/"
 def gallery(token: str, request: Request, person: str = ""):
     if not check_token(token):
         return HTMLResponse("This link is not valid.", status_code=403)
@@ -423,7 +426,7 @@ def photo_page(photo_id: str, request: Request):
     return HTMLResponse(_render(PHOTO_HTML, __OG__=og, __ID__=photo_id, __WHO__=who, __CAP__=cap))
 
 
-@app.get("/tv/{token}", response_class=HTMLResponse)
+@app.get("/tv/{token:path}", response_class=HTMLResponse)
 def tv_page(token: str):
     if not check_token(token):
         return HTMLResponse("This link is not valid.", status_code=403)
