@@ -9,7 +9,6 @@ no WhatsApp group membership needed.
 import io
 import os
 import re
-import tempfile
 import time
 import zipfile
 from contextlib import asynccontextmanager
@@ -268,23 +267,50 @@ def api_download(t: str = "", person: str = "", event: str = "", q: str = "", up
         return JSONResponse({"error": "bad link"}, status_code=403)
     db = store.connect()
     rows = _select_photos(db, person, event, q, uploader, limit=100000)
-    tmp = tempfile.SpooledTemporaryFile(max_size=64 << 20)
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as z:  # JPEGs are already compressed
+    return StreamingResponse(_zip_stream(rows), media_type="application/zip",
+                             headers={"Content-Disposition": 'attachment; filename="wedding-photos.zip"'})
+
+
+class _ZipSink(io.RawIOBase):
+    """Write-only, non-seekable target for ZipFile that hands the bytes straight
+    to the response instead of building the whole archive first."""
+    def __init__(self):
+        self.parts, self.pos = [], 0
+
+    def writable(self):
+        return True
+
+    def write(self, b):
+        self.parts.append(bytes(b))
+        self.pos += len(b)
+        return len(b)
+
+    def tell(self):
+        return self.pos
+
+    def drain(self):
+        parts, self.parts = self.parts, []
+        return parts
+
+
+def _zip_stream(rows):
+    """Stream a zip photo by photo: starts immediately and holds ~1 MB in memory,
+    however big the album (building it up front crashed the small server)."""
+    sink = _ZipSink()
+    with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
         for i, r in enumerate(rows, 1):
             path = os.path.join(store.MEDIA_DIR, r["filename"])
-            if os.path.exists(path):
-                who = re.sub(r"[^\w-]+", "_", r["uploader"] or "family")[:30]
-                z.write(path, f"{r['event'] or 'other'}/{i:04d}_{who}{os.path.splitext(r['filename'])[1]}")
-    tmp.seek(0)
-
-    def stream():
-        try:
-            while chunk := tmp.read(1 << 20):
-                yield chunk
-        finally:
-            tmp.close()
-    return StreamingResponse(stream(), media_type="application/zip",
-                             headers={"Content-Disposition": 'attachment; filename="wedding-photos.zip"'})
+            if not os.path.exists(path):
+                continue
+            who = re.sub(r"[^\w-]+", "_", r["uploader"] or "family")[:30]
+            name = f"{r['event'] or 'other'}/{i:04d}_{who}{os.path.splitext(r['filename'])[1]}"
+            info = zipfile.ZipInfo(name, date_time=time.localtime(os.path.getmtime(path))[:6])
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(path, "rb") as src, z.open(info, "w") as dst:
+                while chunk := src.read(1 << 20):
+                    dst.write(chunk)
+                    yield from sink.drain()
+    yield from sink.drain()   # the zip's table of contents is written when the file closes
 
 
 @app.get("/api/top3")
