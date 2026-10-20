@@ -13,7 +13,6 @@ import time
 import zipfile
 from datetime import datetime
 from html import escape
-from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
@@ -400,7 +399,9 @@ def thumb(photo_id: str):
 # ---------------------------------------------------------------------- pages
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return HTMLResponse(f'<meta http-equiv="refresh" content="0;url=/g/{quote(wa.GALLERY_TOKEN, safe="/+=")}">')
+    """The bare site address must NOT lead into the album — the token in the
+    shared link is the only way in."""
+    return HTMLResponse(_render(HOME_HTML))
 
 
 def _options(labels):
@@ -845,3 +846,12 @@ function tick(){last=Date.now();next();tm=setTimeout(tick,SHOW_MS)}
 (async()=>{await loadAll();await loadTop();await pulse();tick();setInterval(pulse,4000);setInterval(loadTop,30000)})();
 document.addEventListener('click',()=>document.documentElement.requestFullscreen&&document.documentElement.requestFullscreen());
 </script></body></html>"""
+
+HOME_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>__COUPLE__ 💛</title>
+<meta name="robots" content="noindex">
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;
+background:#1a1210;color:#fde68a;font-family:system-ui;padding:24px;box-sizing:border-box}
+h1{font-size:28px;margin:0 0 6px}p{color:#fff;opacity:.85;font-size:16px;line-height:1.5;max-width:340px}</style></head>
+<body><div><h1>🪔 __BRIDE__ ♥ __GROOM__ 🪔</h1><div>__TAGLINE__</div>
+<p>This family album is private. Please open it using the link shared in the family WhatsApp group. 🙏</p></div></body></html>"""
