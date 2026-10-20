@@ -413,9 +413,12 @@ def photo_page(photo_id: str, request: Request):
     if not row:
         return HTMLResponse("Photo not found.", status_code=404)
     origin = _origin(request)
-    who = escape(row["uploader"] or "family")
+    name = row["uploader"] or "family"
+    if re.fullmatch(r"Guest [0-9A-F]{4}", name):
+        name = "a guest"
+    who = escape(name)
     cap = escape(row["caption"] or "")
-    og = _og(f"Photo by {row['uploader'] or 'family'} 💛", row["caption"] or f"From {config.COUPLE}'s wedding",
+    og = _og(f"Photo by {name} 💛", row["caption"] or f"From {config.COUPLE}'s wedding",
              f"{origin}/thumb/{photo_id}", f"{origin}/p/{photo_id}")
     return HTMLResponse(_render(PHOTO_HTML, __OG__=og, __ID__=photo_id, __WHO__=who, __CAP__=cap))
 
@@ -507,14 +510,15 @@ header a{color:#fff;font-size:13px;opacity:.9}
 __CONFETTI__
 const T="__TOKEN__"; let photos=[], cur=0, timer=null, shareFile=null, uploaderF="";
 const getMe=()=>localStorage.getItem("wa_name")||"";
+const disp=u=>!u?'family':/^Guest [0-9A-F]{4}$/.test(u)?'a guest':u;
+function guestId(){let g=getMe();if(!g){g='Guest '+Math.random().toString(16).slice(2,6).toUpperCase();localStorage.setItem("wa_name",g)}return g}
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('on');
   clearTimeout(window._t);window._t=setTimeout(()=>t.classList.remove('on'),3500)}
 const EV=__EVENTS_JSON__;
 const CATS=[["overall","👑 Top 3"],["best_dressed","🥻 Best Dressed"],["couple","💍 __BRIDE__ & __GROOM__"],["candid","😂 Candid Fun"]];
 let ev="", person=new URLSearchParams(location.search).get("person")||"", cat="overall", top3={};
 document.getElementById('clapbtn').onclick=async()=>{
-  const p=photos[cur]; const author=localStorage.getItem("wa_name")||prompt("Your name (for applause):")||"Guest";
-  localStorage.setItem("wa_name",author);
+  const p=photos[cur]; const author=guestId();
   const d=await (await fetch("/api/applaud",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({t:T,photo_id:p.id,author})})).json();
   document.getElementById('clapn').textContent=d.applause; loadTop3();
@@ -529,7 +533,7 @@ async function loadTop3(){
   const d=await (await fetch(`/api/top3?t=${T}`)).json(); top3=d;
   const c=top3.cover;
   document.getElementById('cover').innerHTML=c?`<img src="/thumb/${c.id}" onclick="openLbById('${c.id}')">
-    <div class="tag">📰 Cover of the Day — ${c.uploader||'family'}</div>`:'';
+    <div class="tag">📰 Cover of the Day — ${disp(c.uploader)}</div>`:'';
   document.getElementById('cats').innerHTML=CATS.map(([k,v])=>`<span class="chip ${cat===k?'on':''}" onclick="cat='${k}';loadTop3()">${v}</span>`).join("");
   const list=(top3.podiums[cat]||[]);
   document.getElementById('podiums').innerHTML=list.length?list.map(p=>`<div class="podium">
@@ -569,7 +573,7 @@ document.getElementById('q').addEventListener('input',()=>{clearTimeout(window._
 function openLb(i){cur=i;const p=photos[i];if(!p)return;document.getElementById('lb').style.display='flex';
   document.getElementById('lbimg').src='/media/'+p.id;
   document.getElementById('clapn').textContent=p.applause||0;
-  document.getElementById('cap').textContent=(p.caption||'')+`  ·  shared by ${p.uploader||'family'}  ·  score ${Math.round(p.score||0)}`;
+  document.getElementById('cap').textContent=(p.caption||'')+`  ·  shared by ${disp(p.uploader)}  ·  score ${Math.round(p.score||0)}`;
   document.getElementById('washare').href='https://wa.me/?text='+encodeURIComponent('From the wedding 💛 '+location.origin+'/p/'+p.id);
   document.getElementById('dl').href='/media/'+p.id+'?dl=1';
   shareFile=null;fetch('/media/'+p.id).then(r=>r.blob()).then(b=>{
@@ -591,7 +595,7 @@ async function pulse(){
   try{const d=await (await fetch(`/api/pulse?t=${T}&since=${since}`)).json();
     const s=d.count+'|'+d.applause+'|'+d.leader;
     if(sig!==null&&s!==sig){
-      if(d.new.length){const n=d.new[d.new.length-1];toast(`📸 New photo from ${n.uploader||'family'}!`)}
+      if(d.new.length){const n=d.new[d.new.length-1];toast(`📸 New photo from ${disp(n.uploader)}!`)}
       load();loadTop3()}
     if(lastLeader!==null&&d.leader&&d.leader!==lastLeader){confetti();toast('👑 A new photo just took the crown!')}
     sig=s;lastLeader=d.leader;since=d.now}catch(e){}}
@@ -609,16 +613,15 @@ button{width:100%;margin-top:22px;padding:15px;font-size:17px;font-weight:700;ba
 <h1>📸 Share photos from __BRIDE__ &amp; __GROOM__'s wedding 🪔</h1>
 <p>Pick photos from your phone or camera roll — full quality, no compression. They'll appear in the family album for everyone.</p>
 <form id="f">
-<label>Your name</label><input name="uploader" id="nm" required placeholder="e.g. Priya Sharma">
 <label>Which function?</label><select name="event">
 __EVENT_OPTIONS__</select>
 <label>Photos</label><input type="file" name="files" accept="image/*" multiple required>
 <button type="submit">Upload photos</button><div id="msg"></div></form>
 <script>
-document.getElementById('nm').value=localStorage.getItem('wa_name')||'';
 document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();
-localStorage.setItem('wa_name',document.getElementById('nm').value.trim());
-const fd=new FormData(e.target);fd.append('t','__TOKEN__');
+let gid=localStorage.getItem('wa_name');   // anonymous per-phone id: keeps badges and "My photos" working
+if(!gid){gid='Guest '+Math.random().toString(16).slice(2,6).toUpperCase();localStorage.setItem('wa_name',gid)}
+const fd=new FormData(e.target);fd.append('t','__TOKEN__');fd.append('uploader',gid);
 document.getElementById('msg').textContent='Uploading & scoring… ⚡';
 const r=await fetch('/api/upload',{method:'POST',body:fd});const d=await r.json();
 if(!d.results||!d.results.length){document.getElementById('msg').textContent='Something went wrong — please try again.';return}
@@ -695,7 +698,7 @@ function show(p,isNew){const el=front?L.a:L.b, old=front?L.b:L.a; front=!front;
   const u='/media/'+p.id; const im=new Image(); im.onload=()=>{el.style.backgroundImage=`url(${u})`;
     document.getElementById('bg').style.backgroundImage=`url(${u})`;
     el.classList.add('on');old.classList.remove('on')}; im.src=u;
-  document.getElementById('cap').textContent='📸 '+(p.uploader||'family')+(p.caption?' — '+p.caption:'');
+  const u=p.uploader;document.getElementById('cap').textContent='📸 '+(!u||/^Guest [0-9A-F]{4}$/.test(u)?'a guest':u)+(p.caption?' — '+p.caption:'');
   document.getElementById('new').style.display=isNew?'block':'none';}
 function next(){ // newly arrived photos jump the queue
   if(fresh.length){show(fresh.shift(),true);return}
