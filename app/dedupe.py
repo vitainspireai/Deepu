@@ -11,9 +11,16 @@ zoomed-in retake is compared with the centre of the wider shot). Measured on
 the real wedding photos: variations of one pose 16-100 bits apart, different
 groups of people at the same stage 84+; at 60 no different shots were merged.
 
+Almost duplicates: album photos within ALMOST_DISTANCE of each other but not
+close enough to move automatically. They stay in the album and are listed, in
+sets of look-alikes, for the family to review ("Move to Duplicates" or "Not a
+duplicate"). On the real photos, 90 caught all three missed variations
+(9/12, 14/15, 20/23) plus one look-alike pair of different shots (8/9).
+
 Best-looking = highest resolution, then sharpest, then well exposed. It can't
 judge closed eyes or smiles, so the family can override from the app:
-"Use this one" (dup_pick), "Back to album" (dup_keep) and "Move to Duplicates".
+"Use this one" (dup_pick), "Back to album" (dup_keep), "Move to Duplicates"
+and "Not a duplicate" (dismisses its almost-duplicate pairs).
 """
 import math
 import os
@@ -25,7 +32,9 @@ from PIL import Image
 from . import imaging, store
 
 DUP_DISTANCE = 60
-DUPLICATES = "duplicates"          # pseudo-event the album uses for the folder
+ALMOST_DISTANCE = 90
+DUPLICATES = "duplicates"          # pseudo-events the album uses for the two views
+ALMOST = "almost"
 _lock = threading.Lock()           # uploads and the startup pass both regroup
 
 
@@ -74,6 +83,42 @@ def _closest_visible(db, me, limit=DUP_DISTANCE):
     return best[1] if best else None
 
 
+def _record_pairs(db, me):
+    """Remember every photo that looks like this one (within ALMOST_DISTANCE),
+    in or out of the album, so the review list never has to compare all pairs."""
+    if me["dhash"]:
+        mine = parse(me["dhash"])
+        for r in db.execute("SELECT id, dhash FROM photos WHERE dhash IS NOT NULL AND id != ?", (me["id"],)).fetchall():
+            d = distance(mine, parse(r["dhash"]))
+            if d <= ALMOST_DISTANCE:
+                a, b = sorted((me["id"], r["id"]))
+                db.execute("INSERT OR IGNORE INTO near_pairs (a, b, d) VALUES (?,?,?)", (a, b, d))
+    db.execute("UPDATE photos SET paired = 1 WHERE id = ?", (me["id"],))
+
+
+def almost_sets(db):
+    """{photo id: set number} for album photos with an undismissed look-alike in
+    the album. Look-alikes are joined into sets; sets are numbered oldest first."""
+    parent = {}
+    def root(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for r in db.execute("SELECT np.a, np.b FROM near_pairs np"
+                        " JOIN photos pa ON pa.id = np.a JOIN photos pb ON pb.id = np.b"
+                        " WHERE np.dismissed = 0 AND COALESCE(pa.hidden, 0) = 0 AND COALESCE(pb.hidden, 0) = 0"):
+        parent[root(r["a"])] = root(r["b"])
+    if not parent:
+        return {}
+    marks = ",".join("?" * len(parent))
+    order = [r["id"] for r in db.execute(f"SELECT id FROM photos WHERE id IN ({marks}) ORDER BY created_at", list(parent))]
+    numbers, out = {}, {}
+    for pid in order:
+        out[pid] = numbers.setdefault(root(pid), len(numbers) + 1)
+    return out
+
+
 def place(db, pid):
     """Decide whether a newly analysed photo stays in the album or goes to
     Duplicates. Returns {"duplicate": bool, "of": id or None, "moved": [ids]}
@@ -93,6 +138,8 @@ def place(db, pid):
                 else:
                     db.execute("UPDATE photos SET hidden = 1, duplicate_of = ? WHERE id = ?", (twin["id"], pid))
                     out.update(duplicate=True, of=twin["id"])
+        if me:
+            _record_pairs(db, me)
         db.commit()
         return out
 
@@ -118,6 +165,16 @@ def back_to_album(db, pid):
     """Not a duplicate after all: show it in the album and never group it again."""
     with _lock:
         db.execute("UPDATE photos SET hidden = 0, duplicate_of = NULL, dup_keep = 1 WHERE id = ?", (pid,))
+        db.execute("UPDATE near_pairs SET dismissed = 1 WHERE a = ? OR b = ?", (pid, pid))   # already judged
+        db.commit()
+        return True
+
+
+def not_a_duplicate(db, pid):
+    """Almost duplicates review: this photo is its own moment — stop flagging
+    it against the look-alikes it has now (new look-alikes are still flagged)."""
+    with _lock:
+        db.execute("UPDATE near_pairs SET dismissed = 1 WHERE a = ? OR b = ?", (pid, pid))
         db.commit()
         return True
 
@@ -155,7 +212,7 @@ def clean_up_existing():
                            (imaging.fingerprints(os.path.join(store.MEDIA_DIR, r["filename"])), r["id"]))
                 db.commit()
             except Exception as e:
-                print("fingerprint failed:", r["filename"], e)
+                print("fingerprint failed:", r["filename"], e, flush=True)
         for r in db.execute("SELECT id FROM photos WHERE blur_score IS NULL").fetchall():
             analyze_one(db, r["id"])       # e.g. Memory Lane photos were never analysed
         tagged = [r["photo_id"] for r in db.execute("SELECT photo_id FROM photo_tags WHERE tag = 'duplicate'")]
@@ -168,8 +225,13 @@ def clean_up_existing():
         for r in db.execute("SELECT id FROM photos WHERE COALESCE(grouped, 0) = 0 ORDER BY created_at").fetchall():
             res = place(db, r["id"])
             moved += res["duplicate"] + len(res["moved"])
+        for r in db.execute("SELECT * FROM photos WHERE COALESCE(paired, 0) = 0 ORDER BY created_at").fetchall():
+            with _lock:                     # photos sorted before the almost-duplicates review existed
+                _record_pairs(db, r)
+                db.commit()
         hidden = db.execute("SELECT COUNT(*) n FROM photos WHERE hidden = 1").fetchone()["n"]
         print(f"dedupe: fingerprinted {len(todo)} photo(s), cleared {len(tagged)} old duplicate tag(s), "
-              f"{moved} move(s) to Duplicates, {hidden} photo(s) now in Duplicates")
+              f"{moved} move(s) to Duplicates, {hidden} photo(s) now in Duplicates, "
+              f"{len(almost_sets(db))} almost-duplicate(s) to review", flush=True)
     except Exception:
         traceback.print_exc()

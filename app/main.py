@@ -244,6 +244,17 @@ def _select_photos(db, person="", event="", q="", uploader="", limit=300):
     return db.execute(sql, args).fetchall()
 
 
+def _view(db, person, event, q, uploader, limit):
+    """Photos for an album view. 'almost' = album photos with a look-alike,
+    ordered set by set so look-alikes sit side by side."""
+    if event != dedupe.ALMOST:
+        return _select_photos(db, person, event, q, uploader, limit), {}
+    sets = dedupe.almost_sets(db)
+    rows = [r for r in _select_photos(db, person, "", q, uploader, 100000) if r["id"] in sets]
+    rows.sort(key=lambda r: (sets[r["id"]], r["created_at"]))
+    return rows[:limit], sets
+
+
 @app.get("/api/photos")
 def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
                uploader: str = "", limit: int = 10000):
@@ -255,9 +266,12 @@ def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
     claps = {r["photo_id"]: r["n"] for r in db.execute(
         "SELECT photo_id, COUNT(*) n FROM applause GROUP BY photo_id")}
     rows = []
-    for r in _select_photos(db, person, event, q, uploader, limit):
+    view, sets = _view(db, person, event, q, uploader, limit)
+    for r in view:
         row = dict(r)
         row["applause"] = claps.get(r["id"], 0)
+        if sets:
+            row["almost_set"] = sets[r["id"]]
         rows.append(row)
     people = [dict(r) for r in db.execute(
         "SELECT * FROM people WHERE face_count > 0 ORDER BY face_count DESC")]
@@ -265,6 +279,7 @@ def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
         "SELECT event, COUNT(*) n FROM photos WHERE COALESCE(hidden, 0) = 0 GROUP BY event")}
     counts[dedupe.DUPLICATES] = db.execute(
         "SELECT COUNT(*) n FROM photos WHERE COALESCE(hidden, 0) = 1").fetchone()["n"]
+    counts[dedupe.ALMOST] = len(sets) if event == dedupe.ALMOST else len(dedupe.almost_sets(db))
     smart = db.execute("SELECT COUNT(*) n FROM photo_tags WHERE tag NOT IN ('duplicate', 'blurry')").fetchone()["n"]
     return {"photos": rows, "people": people, "event_counts": counts, "smart_tags": smart > 0}
 
@@ -292,7 +307,7 @@ def api_download(t: str = "", person: str = "", event: str = "", q: str = "", up
     if not check_token(t):
         return JSONResponse({"error": "bad link"}, status_code=403)
     db = store.connect()
-    rows = _select_photos(db, person, event, q, uploader, limit=100000)
+    rows, _ = _view(db, person, event, q, uploader, 100000)
     return StreamingResponse(_zip_stream(rows), media_type="application/zip",
                              headers={"Content-Disposition": 'attachment; filename="wedding-photos.zip"'})
 
@@ -382,11 +397,13 @@ async def applaud(request: Request):
 @app.post("/api/photos/{photo_id}/dup/{action}")
 async def duplicate_action(photo_id: str, action: str, request: Request):
     """Fix the Duplicates folder by hand: 'best' (use this shot in the album),
-    'keep' (back to the album, never grouped again), 'hide' (move to Duplicates)."""
+    'keep' (back to the album, never grouped again), 'hide' (move to Duplicates),
+    'notdup' (Almost duplicates review: stop flagging this one)."""
     body = await request.json()
     if not check_token(body.get("t", "")):
         return JSONResponse({"error": "bad link"}, status_code=403)
-    fn = {"best": dedupe.use_this_one, "keep": dedupe.back_to_album, "hide": dedupe.move_to_duplicates}.get(action)
+    fn = {"best": dedupe.use_this_one, "keep": dedupe.back_to_album, "hide": dedupe.move_to_duplicates,
+          "notdup": dedupe.not_a_duplicate}.get(action)
     if not fn:
         return JSONResponse({"error": "unknown action"}, status_code=404)
     db = store.connect()
@@ -605,6 +622,7 @@ body{padding-bottom:84px}
 #up select,#up input[type=file]{width:100%;padding:12px;font-size:16px;border-radius:10px;border:1px solid #6b4226;background:#1a1210;color:#fff;box-sizing:border-box}
 #up .btns{display:flex;gap:8px;margin-top:16px} #up .btns .act{flex:1;padding:13px;font-size:16px}
 #upmsg{margin-top:14px;font-size:15px;line-height:1.5}
+.sethead{grid-column:1/-1;padding:12px 6px 4px;font-size:13px;font-weight:700;color:#fde68a}
 #up input[type=text]{width:100%;padding:12px;font-size:16px;border-radius:10px;border:1px solid #6b4226;background:#1a1210;color:#fff;box-sizing:border-box}
 .chk{display:flex;gap:10px;align-items:flex-start;margin-top:14px;padding:12px;border:1px dashed #f59e0b;border-radius:10px;font-size:14px;line-height:1.35;cursor:pointer}
 .chk input{width:20px;height:20px;margin:0;flex-shrink:0}
@@ -638,6 +656,8 @@ body{padding-bottom:84px}
 <div class="tools"><button class="act" onclick="slideshow()">▶ Play slideshow</button>
 <a class="tool" id="mine" onclick="toggleMine()" style="display:none">🙋 My photos</a>
 <a class="tool" id="zip" href="#">⬇ Download these (zip)</a>
+<a class="tool" id="dupbtn" onclick="toggleDups()" style="display:none">🔁 Duplicates</a>
+<a class="tool" id="almostbtn" onclick="toggleAlmost()" style="display:none">🟡 Almost duplicates</a>
 <a class="tool" id="sharep" onclick="sharePerson()" style="display:none">🔗 Share this person</a></div>
 <div id="grid"></div>
 <div id="guesswho" style="display:none"><div style="padding:10px 12px;font-size:18px;font-weight:700">❓ Guess Who <small style="font-weight:400;opacity:.75">name the mystery guests — their photos unlock!</small></div>
@@ -649,7 +669,8 @@ body{padding-bottom:84px}
 <a class="dl" id="dl" download>⬇ Save</a></div>
 <div class="row" id="duprow"><button class="act" id="dupbest" onclick="dupAct('best')">⭐ Use this one in the album</button>
 <button class="act" id="dupkeep" style="background:#3b241c;color:#ffd9a0" onclick="dupAct('keep')">↩ Back to album</button>
-<a class="dl" id="duphide" onclick="dupAct('hide')" style="cursor:pointer">🔁 Move to Duplicates</a></div>
+<a class="dl" id="duphide" onclick="dupAct('hide')" style="cursor:pointer">🔁 Move to Duplicates</a>
+<a class="dl" id="dupnot" onclick="dupAct('notdup')" style="cursor:pointer">✓ Not a duplicate</a></div>
 <img id="lbimg"><div id="cap"></div></div>
 <script>
 __CONFETTI__
@@ -706,29 +727,43 @@ async function load(){
   const mine=document.getElementById('mine');mine.style.display=getMe()?'':'none';
   mine.style.background=uploaderF?'#f59e0b':'';mine.style.color=uploaderF?'#1a1210':'';
   document.getElementById('sharep').style.display=person?'':'none';
-  const dupv=ev==='duplicates';
-  document.getElementById('count').textContent=ev==='throwback'?photos.length+" memories treasured 📜":dupv?photos.length+" in Duplicates 🔁":photos.length+" photos shared with blessings 🙏";
+  const dupv=ev==='duplicates', almv=ev==='almost';
+  document.getElementById('count').textContent=ev==='throwback'?photos.length+" memories treasured 📜":dupv?photos.length+" in Duplicates 🔁":almv?photos.length+" look-alikes to review 🟡":photos.length+" photos shared with blessings 🙏";
   const mem=ev==='throwback';
   if(mem){photos.sort((a,b)=>(a.memory_year||'9999').localeCompare(b.memory_year||'9999')||a.created_at-b.created_at); // oldest first, like a timeline
     if(lbOpen&&curId){const i=photos.findIndex(p=>p.id===curId);cur=i>=0?i:0}}
-  const hint=document.getElementById('memhint');hint.style.display=mem||dupv?'block':'none';
-  hint.innerHTML=dupv
+  const hint=document.getElementById('memhint');hint.style.display=mem||dupv||almv?'block':'none';
+  hint.innerHTML=almv
+    ?'🟡 <b>Almost duplicates</b> — photos still in the album that look very like another one, shown in sets side by side. Tap a photo you don\'t need and choose <b>🔁 Move to Duplicates</b>, or <b>✓ Not a duplicate</b> to stop flagging it.'
+    :dupv
     ?'🔁 <b>Duplicates</b> — repeat copies and close variations (bursts, retakes). The best-looking shot of each set stays in the album; the rest wait here. Tap a photo to <b>use it in the album instead</b> or put it <b>back in the album</b>.'
     :'📜 <b>Memory Lane</b> — photos from past gatherings and earlier weddings, oldest first. Tap <b>Add photos</b> and choose “Old memory” to share yours.';
-  document.getElementById('grid').innerHTML=photos.map((p,i)=>mem
+  let lastSet=0;
+  const head=p=>almv&&p.almost_set!==lastSet?`<div class="sethead">Set ${lastSet=p.almost_set} · look-alikes</div>`:'';
+  document.getElementById('grid').innerHTML=photos.map((p,i)=>head(p)+(mem
     ?`<span class="yr" onclick="openLb(${i})"><img src="/t/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
-    :`<img src="/t/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
+    :`<img src="/t/${p.id}" onclick="openLb(${i})" loading="lazy">`)).join("");
   if(mem&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No memories yet — be the first to share one! 📜</div>';
+  if(almv&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No look-alikes left to review — nice! ✨</div>';
   if(dupv&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No duplicates — every photo in the album is one of a kind! ✨</div>';
   document.getElementById('people').style.display=d.people.length?'':'none';
   document.getElementById('q').placeholder=d.smart_tags?'Search: dancing, dhol, Deepu, Krishna, mehndi…':'Search by caption or who shared it…';
   document.getElementById('people').innerHTML=d.people.map(p=>`<div class="person" onclick="setPerson('${p.id}')">
     <img src="/t/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
-  const evs=EV.concat(d.event_counts.duplicates||dupv?[['duplicates','🔁 Duplicates']]:[]);   // folder appears once there's something in it
-  document.getElementById('events').innerHTML=evs.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
+  const dupBtn=document.getElementById('dupbtn'), nd=d.event_counts.duplicates||0;   // shown once there's something in the folder
+  dupBtn.style.display=nd||dupv?'':'none';
+  dupBtn.textContent=dupv?'✕ Close Duplicates':`🔁 Duplicates (${nd})`;
+  dupBtn.style.background=dupv?'#f59e0b':'';dupBtn.style.color=dupv?'#1a1210':'';
+  const almBtn=document.getElementById('almostbtn'), na=d.event_counts.almost||0;
+  almBtn.style.display=na||almv?'':'none';
+  almBtn.textContent=almv?'✕ Close Almost duplicates':`🟡 Almost duplicates (${na})`;
+  almBtn.style.background=almv?'#f59e0b':'';almBtn.style.color=almv?'#1a1210':'';
+  document.getElementById('events').innerHTML=EV.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
 }
 function setEv(k){ev=k;person="";load()} function setPerson(id){person=person===id?"":id;load()}
 function toggleMine(){uploaderF=uploaderF?"":getMe();load()}
+function toggleDups(){setEv(ev==='duplicates'?'':'duplicates')}
+function toggleAlmost(){setEv(ev==='almost'?'':'almost')}
 async function sharePerson(){const url=`${location.origin}/g/${T}?person=${person}`;
   if(navigator.share){try{await navigator.share({title:'Wedding photos',text:'All their photos from the wedding 💛',url});return}catch(e){if(e.name==='AbortError')return}}
   window.open('https://wa.me/?text='+encodeURIComponent(url),'_blank')}
@@ -743,6 +778,7 @@ function openLb(i){cur=i;const p=photos[i];if(!p)return;document.getElementById(
   document.getElementById('dupbest').style.display=inDup?'':'none';
   document.getElementById('dupkeep').style.display=inDup?'':'none';
   document.getElementById('duphide').style.display=inDup||p.event==='throwback'?'none':'';
+  document.getElementById('dupnot').style.display=p.almost_set?'':'none';   // only while reviewing look-alikes
   shareFile=null;fetch('/media/'+p.id).then(r=>r.blob()).then(b=>{
     if(photos[cur]&&photos[cur].id===p.id)shareFile=new File([b],p.orig_name||(p.id+'.jpg'),{type:b.type||'image/jpeg'})}).catch(()=>{});}
 async function nativeShare(){
@@ -758,7 +794,7 @@ async function dupAct(action){
   if(action==='hide'&&!confirm('Move this photo to the Duplicates folder? You can bring it back any time.'))return;
   const r=await fetch(`/api/photos/${p.id}/dup/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({t:T})});
   if(!r.ok){toast('Something went wrong — please try again.');return}
-  toast({best:'⭐ Done — this shot is in the album now',keep:'↩ Back in the album',hide:'🔁 Moved to Duplicates'}[action]);
+  toast({best:'⭐ Done — this shot is in the album now',keep:'↩ Back in the album',hide:'🔁 Moved to Duplicates',notdup:'✓ Got it — not flagged any more'}[action]);
   closeLb();load();loadTop3();
 }
 function slideshow(){if(!photos.length)return;openLb(0);timer=setInterval(()=>{cur=(cur+1)%photos.length;openLb(cur)},3500)}
