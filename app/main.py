@@ -9,8 +9,10 @@ no WhatsApp group membership needed.
 import io
 import os
 import re
+import threading
 import time
 import zipfile
+from contextlib import asynccontextmanager
 from datetime import datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -20,10 +22,18 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
                                StreamingResponse)
 from PIL import Image
 
-from . import config, imaging, rank, store, wa
+from . import config, dedupe, imaging, rank, store, wa
 from .ai_worker import analyze_one
 
-app = FastAPI(title="Wedding Photo Share")
+@asynccontextmanager
+async def lifespan(_app):
+    # sort photos uploaded before the Duplicates folder existed — in the
+    # background, one small image at a time, so the site is up immediately
+    threading.Thread(target=dedupe.clean_up_existing, name="dedupe", daemon=True).start()
+    yield
+
+
+app = FastAPI(title="Wedding Photo Share", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -54,9 +64,12 @@ def announce_upload(db, photo_id, uploader):
     whether it stole the crown, and any badges the uploader just earned."""
     before = rank.leader_id(db, exclude=photo_id)
     analyze_one(db, photo_id)
+    placed = dedupe.place(db, photo_id)
+    if placed["duplicate"]:   # a close variation of a better shot already in the album
+        return {"photo_id": photo_id, "duplicate": True, "of": placed["of"], "badges": []}
     score, reason = rank.rescore(db, photo_id)
     after = rank.leader_id(db)
-    pos = db.execute("SELECT COUNT(*) n FROM photos WHERE score > ?",
+    pos = db.execute(f"SELECT COUNT(*) n FROM photos WHERE score > ? AND {rank.LIVE}",
                      (score,)).fetchone()["n"] + 1
     now_ts, day_start, hour = _day()
     badges = rank.award_badges(db, uploader, photo_id, now_ts, day_start, hour)
@@ -64,7 +77,7 @@ def announce_upload(db, photo_id, uploader):
             "position": pos, "crown": after == photo_id and before != photo_id,
             "dethroned_id": before if (after == photo_id and before
                                         and before != photo_id) else None,
-            "badges": badges}
+            "badges": badges, "moved": len(placed["moved"])}
 
 
 # ---------------------------------------------------------------- WhatsApp in
@@ -100,12 +113,20 @@ async def webhook_receive(request: Request):
                             pid = store.add_photo(db, filename=fname, orig_name=media.get("filename"),
                                                   source="whatsapp", uploader=name, uploader_wa=sender,
                                                   caption=msg.get("caption") or media.get("caption"),
-                                                  width=w, height=h)
+                                                  width=w, height=h, dhash=_fingerprints(dest))
                             res = announce_upload(db, pid, name)
+                            if res.get("duplicate"):
+                                wa.send_text(sender,
+                                             f"🔁 Thanks, {name.split()[0]}! That one looks like a close variation of a photo "
+                                             "already in the album, so it's saved in the Duplicates folder. "
+                                             f"Send a different moment to climb the leaderboard! {wa.gallery_link()}")
+                                continue
                             line1 = (f"👑 STOP THE PRESSES! Your photo just took the #1 crown! {res['reason']}"
                                      if res["crown"]
                                      else f"Got it, {name.split()[0]}! 📸 Your photo is ranked #{res['position']}. {res['reason']}")
                             badge_line = "".join(f"\n🏅 New badge: {b}" for b in res["badges"])
+                            if res.get("moved"):
+                                badge_line += "\n✨ It's the best of its set of similar shots, so it now leads in the album."
                             wa.send_text(sender,
                                          f"{line1}{badge_line}\n"
                                          f"See the live leaderboard & add full-quality photos: {wa.gallery_link()}")
@@ -164,16 +185,27 @@ async def api_upload(t: str = Form(""), uploader: str = Form("Family"),
         memory = event == config.MEMORY
         pid = store.add_photo(db, filename=fname, orig_name=f.filename,
                               source="web", uploader=uploader or "Family",
-                              event=event, width=w, height=h,
+                              event=event, width=w, height=h, dhash=_fingerprints(dest),
                               caption=(story.strip()[:200] or None) if memory else None,
                               memory_year=(re.sub(r"\D", "", year)[:4] or None) if memory else None)
         saved.append(pid)
         if memory:  # throwbacks aren't scored or ranked — they just join Memory Lane
-            results.append({"photo_id": pid, "memory": True,
-                            "badges": rank.award_memory_badge(db, uploader or "Family", time.time())})
+            analyze_one(db, pid)
+            placed = dedupe.place(db, pid)
+            results.append({"photo_id": pid, "memory": True, "duplicate": placed["duplicate"],
+                            "badges": [] if placed["duplicate"] else
+                            rank.award_memory_badge(db, uploader or "Family", time.time())})
         else:
             results.append(announce_upload(db, pid, uploader or "Family"))
     return {"saved": saved, "count": len(saved), "results": results}
+
+
+def _fingerprints(path):
+    try:
+        return imaging.fingerprints(path)
+    except Exception as e:
+        print("fingerprint failed:", path, e)
+        return None
 
 
 def _dims(path):
@@ -201,6 +233,11 @@ def _select_photos(db, person="", event="", q="", uploader="", limit=300):
         sql += (" AND (" + " OR ".join(["pt.tag LIKE ?"] * len(like)) +
                 " OR p.caption LIKE ? OR p.uploader LIKE ?)")
         args += like + [like[0]] * 2
+    if event == dedupe.DUPLICATES:   # the Duplicates folder: every hidden variation
+        sql = sql.replace(" AND p.event = ?", "", 1); args.remove(event)
+        sql += " AND COALESCE(p.hidden, 0) = 1"
+    else:
+        sql += " AND COALESCE(p.hidden, 0) = 0"
     if not event:  # the live album never mixes in old memories
         sql += f" AND COALESCE(p.event, '') != '{config.MEMORY}'"
     sql += " ORDER BY p.created_at DESC LIMIT ?"; args.append(limit)
@@ -225,7 +262,9 @@ def api_photos(t: str = "", person: str = "", event: str = "", q: str = "",
     people = [dict(r) for r in db.execute(
         "SELECT * FROM people WHERE face_count > 0 ORDER BY face_count DESC")]
     counts = {r["event"]: r["n"] for r in db.execute(
-        "SELECT event, COUNT(*) n FROM photos GROUP BY event")}
+        "SELECT event, COUNT(*) n FROM photos WHERE COALESCE(hidden, 0) = 0 GROUP BY event")}
+    counts[dedupe.DUPLICATES] = db.execute(
+        "SELECT COUNT(*) n FROM photos WHERE COALESCE(hidden, 0) = 1").fetchone()["n"]
     smart = db.execute("SELECT COUNT(*) n FROM photo_tags WHERE tag NOT IN ('duplicate', 'blurry')").fetchone()["n"]
     return {"photos": rows, "people": people, "event_counts": counts, "smart_tags": smart > 0}
 
@@ -239,7 +278,8 @@ def api_pulse(t: str = "", since: float = 0):
     db = store.connect()
     row = db.execute("SELECT COUNT(*) n, COALESCE(MAX(created_at), 0) latest FROM photos").fetchone()
     new = [dict(r) for r in db.execute(
-        "SELECT id, uploader, caption, created_at, event, memory_year FROM photos WHERE created_at > ?"
+        "SELECT id, uploader, caption, created_at, event, memory_year FROM photos"
+        " WHERE created_at > ? AND COALESCE(hidden, 0) = 0"
         " ORDER BY created_at LIMIT 20", (since,))]
     return {"count": row["n"], "latest": row["latest"],
             "applause": db.execute("SELECT COUNT(*) n FROM applause").fetchone()["n"],
@@ -337,6 +377,22 @@ async def applaud(request: Request):
     score, reason = rank.rescore(db, body["photo_id"])
     return {"ok": True, "score": score, "reason": reason,
             "applause": rank._applause(db, body["photo_id"])}
+
+
+@app.post("/api/photos/{photo_id}/dup/{action}")
+async def duplicate_action(photo_id: str, action: str, request: Request):
+    """Fix the Duplicates folder by hand: 'best' (use this shot in the album),
+    'keep' (back to the album, never grouped again), 'hide' (move to Duplicates)."""
+    body = await request.json()
+    if not check_token(body.get("t", "")):
+        return JSONResponse({"error": "bad link"}, status_code=403)
+    fn = {"best": dedupe.use_this_one, "keep": dedupe.back_to_album, "hide": dedupe.move_to_duplicates}.get(action)
+    if not fn:
+        return JSONResponse({"error": "unknown action"}, status_code=404)
+    db = store.connect()
+    ok = fn(db, photo_id)
+    rank.rescore(db, photo_id)
+    return {"ok": ok}
 
 
 @app.post("/api/people/{person_id}/name")
@@ -591,6 +647,9 @@ body{padding-bottom:84px}
 <button class="act" id="sharebtn" onclick="nativeShare()">↗ Share</button>
 <a class="act" id="washare" target="_blank">WhatsApp</a>
 <a class="dl" id="dl" download>⬇ Save</a></div>
+<div class="row" id="duprow"><button class="act" id="dupbest" onclick="dupAct('best')">⭐ Use this one in the album</button>
+<button class="act" id="dupkeep" style="background:#3b241c;color:#ffd9a0" onclick="dupAct('keep')">↩ Back to album</button>
+<a class="dl" id="duphide" onclick="dupAct('hide')" style="cursor:pointer">🔁 Move to Duplicates</a></div>
 <img id="lbimg"><div id="cap"></div></div>
 <script>
 __CONFETTI__
@@ -647,21 +706,26 @@ async function load(){
   const mine=document.getElementById('mine');mine.style.display=getMe()?'':'none';
   mine.style.background=uploaderF?'#f59e0b':'';mine.style.color=uploaderF?'#1a1210':'';
   document.getElementById('sharep').style.display=person?'':'none';
-  document.getElementById('count').textContent=ev==='throwback'?photos.length+" memories treasured 📜":photos.length+" photos shared with blessings 🙏";
+  const dupv=ev==='duplicates';
+  document.getElementById('count').textContent=ev==='throwback'?photos.length+" memories treasured 📜":dupv?photos.length+" in Duplicates 🔁":photos.length+" photos shared with blessings 🙏";
   const mem=ev==='throwback';
   if(mem){photos.sort((a,b)=>(a.memory_year||'9999').localeCompare(b.memory_year||'9999')||a.created_at-b.created_at); // oldest first, like a timeline
     if(lbOpen&&curId){const i=photos.findIndex(p=>p.id===curId);cur=i>=0?i:0}}
-  const hint=document.getElementById('memhint');hint.style.display=mem?'block':'none';
-  hint.innerHTML='📜 <b>Memory Lane</b> — photos from past gatherings and earlier weddings, oldest first. Tap <b>Add photos</b> and tick “old memory” to share yours.';
+  const hint=document.getElementById('memhint');hint.style.display=mem||dupv?'block':'none';
+  hint.innerHTML=dupv
+    ?'🔁 <b>Duplicates</b> — repeat copies and close variations (bursts, retakes). The best-looking shot of each set stays in the album; the rest wait here. Tap a photo to <b>use it in the album instead</b> or put it <b>back in the album</b>.'
+    :'📜 <b>Memory Lane</b> — photos from past gatherings and earlier weddings, oldest first. Tap <b>Add photos</b> and choose “Old memory” to share yours.';
   document.getElementById('grid').innerHTML=photos.map((p,i)=>mem
     ?`<span class="yr" onclick="openLb(${i})"><img src="/t/${p.id}" loading="lazy">${p.memory_year?`<b>${p.memory_year}</b>`:''}</span>`
     :`<img src="/t/${p.id}" onclick="openLb(${i})" loading="lazy">`).join("");
   if(mem&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No memories yet — be the first to share one! 📜</div>';
+  if(dupv&&!photos.length)document.getElementById('grid').innerHTML='<div style="padding:20px;opacity:.75;grid-column:1/-1">No duplicates — every photo in the album is one of a kind! ✨</div>';
   document.getElementById('people').style.display=d.people.length?'':'none';
   document.getElementById('q').placeholder=d.smart_tags?'Search: dancing, dhol, Deepu, Krishna, mehndi…':'Search by caption or who shared it…';
   document.getElementById('people').innerHTML=d.people.map(p=>`<div class="person" onclick="setPerson('${p.id}')">
     <img src="/t/${p.cover_photo||''}"><br>${p.name||'Who is this?'}<br><small>${p.face_count} photos</small></div>`).join("");
-  document.getElementById('events').innerHTML=EV.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
+  const evs=EV.concat(d.event_counts.duplicates||dupv?[['duplicates','🔁 Duplicates']]:[]);   // folder appears once there's something in it
+  document.getElementById('events').innerHTML=evs.map(([k,v])=>`<span class="chip ${ev===k?'on':''}" onclick="setEv('${k}')">${v}${d.event_counts[k]?' ('+d.event_counts[k]+')':''}</span>`).join("");
 }
 function setEv(k){ev=k;person="";load()} function setPerson(id){person=person===id?"":id;load()}
 function toggleMine(){uploaderF=uploaderF?"":getMe();load()}
@@ -675,6 +739,10 @@ function openLb(i){cur=i;const p=photos[i];if(!p)return;document.getElementById(
   document.getElementById('cap').textContent=p.event==='throwback'?`📜 ${p.memory_year?p.memory_year+' — ':''}${p.caption||'A treasured memory'}  ·  shared by ${disp(p.uploader)}`:(p.caption||'')+`  ·  shared by ${disp(p.uploader)}  ·  score ${Math.round(p.score||0)}`;
   document.getElementById('washare').href='https://wa.me/?text='+encodeURIComponent('From the wedding 💛 '+location.origin+'/p/'+p.id);
   document.getElementById('dl').href='/media/'+p.id+'?dl=1';
+  const inDup=!!p.hidden; // in the Duplicates folder: offer to swap it in; in the album: offer to file it away
+  document.getElementById('dupbest').style.display=inDup?'':'none';
+  document.getElementById('dupkeep').style.display=inDup?'':'none';
+  document.getElementById('duphide').style.display=inDup||p.event==='throwback'?'none':'';
   shareFile=null;fetch('/media/'+p.id).then(r=>r.blob()).then(b=>{
     if(photos[cur]&&photos[cur].id===p.id)shareFile=new File([b],p.orig_name||(p.id+'.jpg'),{type:b.type||'image/jpeg'})}).catch(()=>{});}
 async function nativeShare(){
@@ -685,6 +753,14 @@ async function nativeShare(){
   }catch(e){if(e.name==='AbortError')return}
   try{await navigator.clipboard.writeText(url);toast('🔗 Link copied — paste it anywhere')}catch(e){prompt('Copy this link:',url)}}
 function closeLb(){document.getElementById('lb').style.display='none';stopShow()}
+async function dupAct(action){
+  const p=photos[cur];if(!p)return;
+  if(action==='hide'&&!confirm('Move this photo to the Duplicates folder? You can bring it back any time.'))return;
+  const r=await fetch(`/api/photos/${p.id}/dup/${action}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({t:T})});
+  if(!r.ok){toast('Something went wrong — please try again.');return}
+  toast({best:'⭐ Done — this shot is in the album now',keep:'↩ Back in the album',hide:'🔁 Moved to Duplicates'}[action]);
+  closeLb();load();loadTop3();
+}
 function slideshow(){if(!photos.length)return;openLb(0);timer=setInterval(()=>{cur=(cur+1)%photos.length;openLb(cur)},3500)}
 function stopShow(){if(timer)clearInterval(timer);timer=null}
 document.getElementById('lbimg').addEventListener('click',e=>{const r=e.target.getBoundingClientRect();
@@ -698,19 +774,21 @@ async function doUpload(){
   const msg=document.getElementById('upmsg'), inp=document.getElementById('upfiles'), go=document.getElementById('upgo');
   const files=[...inp.files]; if(!files.length){msg.textContent='Pick some photos first 🙂';return}
   const evSel=document.getElementById('upev').value, isMem=evSel==='throwback', gid=guestId(), BATCH=4; // small batches keep phone uploads reliable
-  let ok=0,best=null,badges=[],crown=false; go.disabled=true;
+  let ok=0,dups=0,led=0,best=null,badges=[],crown=false; go.disabled=true;
   for(let i=0;i<files.length;i+=BATCH){
     const fd=new FormData();fd.append('t',T);fd.append('uploader',gid);fd.append('event',evSel);
     if(isMem){fd.append('year',document.getElementById('upyr').value);fd.append('story',document.getElementById('upstory').value)}
     files.slice(i,i+BATCH).forEach(f=>fd.append('files',f));
     msg.textContent=`Uploading ${Math.min(i+BATCH,files.length)} of ${files.length}… ⚡`;
     try{const d=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
-      (d.results||[]).forEach(r=>{ok++;if(!r.memory&&(!best||r.position<best.position))best=r;badges.push(...r.badges);if(r.crown)crown=true})}catch(e){}
+      (d.results||[]).forEach(r=>{if(r.duplicate){dups++;return}ok++;if(r.moved)led++;if(!r.memory&&(!best||r.position<best.position))best=r;badges.push(...r.badges);if(r.crown)crown=true})}catch(e){}
   }
   go.disabled=false;inp.value='';
-  if(!ok){msg.textContent='Something went wrong — please try again.';return}
+  const dupLine=dups?`🔁 ${dups} ${dups>1?'were close variations':'was a close variation'} of ${dups>1?'shots':'a shot'} already in the album, so ${dups>1?'they went':'it went'} to the Duplicates folder.`:'';
+  if(!ok&&!dups){msg.textContent='Something went wrong — please try again.';return}
+  if(!ok){msg.innerHTML=dupLine;load();return}
   const head=isMem?`📜 ${ok} memor${ok>1?'ies':'y'} added to Memory Lane — thank you for sharing!`:crown?'👑👑👑 CROWN TAKEN! One of your photos is #1!':best.position<=3?`${['🥇','🥈','🥉'][best.position-1]} On the podium — your best is #${best.position}!`:`✅ ${ok} photo${ok>1?'s':''} added — your best is ranked #${best.position}.`;
-  msg.innerHTML=head+(best&&!isMem?`<br><small>${best.reason}</small>`:'')+(badges.length?`<br>🏅 New badge: ${[...new Set(badges)].join(', ')}`:'')+(ok<files.length?`<br>⚠️ ${files.length-ok} file(s) couldn't be added.`:'');
+  msg.innerHTML=head+(best&&!isMem?`<br><small>${best.reason}</small>`:'')+(badges.length?`<br>🏅 New badge: ${[...new Set(badges)].join(', ')}`:'')+(led?`<br>✨ ${led>1?led+' of your photos are':'Your photo is'} the best of ${led>1?'their':'its'} set of similar shots, so the others moved to Duplicates.`:'')+(dupLine?'<br>'+dupLine:'')+(ok+dups<files.length?`<br>⚠️ ${files.length-ok-dups} file(s) couldn't be added.`:'');
   if(crown)confetti();
   load();loadTop3();
 }
@@ -750,7 +828,9 @@ document.getElementById('msg').textContent='Uploading & scoring… ⚡';
 const r=await fetch('/api/upload',{method:'POST',body:fd});const d=await r.json();
 if(!d.results||!d.results.length){document.getElementById('msg').textContent='Something went wrong — please try again.';return}
 document.getElementById('msg').innerHTML=d.results.map(res=>
-  res.crown?`👑👑👑 CROWN TAKEN! Your photo is #1! ${res.reason}`
+  res.duplicate?'🔁 A close variation of a photo already in the album — saved in the Duplicates folder.'
+  :res.memory?'📜 Added to Memory Lane — thank you!'
+  :res.crown?`👑👑👑 CROWN TAKEN! Your photo is #1! ${res.reason}`
   :res.position===2?`🥈 So close — your photo is #2! ${res.reason}`
   :res.position===3?`🥉 On the podium — #3! ${res.reason}`
   :`✅ Ranked #${res.position} — the crown is within reach! ${res.reason}`

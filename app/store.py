@@ -87,7 +87,10 @@ def connect():
     # migrate older databases
     cols = {r["name"] for r in db.execute("PRAGMA table_info(photos)")}
     for col, ctype in (("brightness", "REAL"), ("score", "REAL DEFAULT 0"),
-                       ("uploader_wa", "TEXT"), ("memory_year", "TEXT")):
+                       ("uploader_wa", "TEXT"), ("memory_year", "TEXT"),
+                       ("dhash", "TEXT"), ("hidden", "INTEGER DEFAULT 0"), ("duplicate_of", "TEXT"),
+                       ("grouped", "INTEGER DEFAULT 0"), ("dup_keep", "INTEGER DEFAULT 0"),
+                       ("dup_pick", "INTEGER DEFAULT 0")):
         if col not in cols:
             db.execute(f"ALTER TABLE photos ADD COLUMN {col} {ctype}")
     db.commit()
@@ -100,14 +103,14 @@ def new_id():
 
 def add_photo(db, *, filename, orig_name, source, uploader, caption=None,
               event=None, taken_at=None, width=None, height=None, uploader_wa=None,
-              memory_year=None):
+              memory_year=None, dhash=None):
     pid = new_id()
     db.execute(
         "INSERT INTO photos (id, filename, orig_name, source, uploader, caption,"
-        " event, taken_at, created_at, width, height, uploader_wa, memory_year)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " event, taken_at, created_at, width, height, uploader_wa, memory_year, dhash)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (pid, filename, orig_name, source, uploader, caption, event,
-         taken_at or time.time(), time.time(), width, height, uploader_wa, memory_year),
+         taken_at or time.time(), time.time(), width, height, uploader_wa, memory_year, dhash),
     )
     db.commit()
     return pid

@@ -9,7 +9,7 @@ import time
 
 from .config import EVENT_LINES, MEMORY
 
-LIVE = f"COALESCE(event, '') != '{MEMORY}'"   # memories never compete
+LIVE = f"COALESCE(event, '') != '{MEMORY}' AND COALESCE(hidden, 0) = 0"   # memories and hidden duplicates never compete
 
 TAG_BONUS = {"dancing": 8, "candid laughing": 7, "baraat": 6, "bride": 5,
              "groom": 5, "couple": 6, "decorations": 4, "selfie": 3,

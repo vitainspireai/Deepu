@@ -76,9 +76,15 @@ Built to turn "please share your photos" into a friendly family contest:
   photos.
 - **Smart search**: "dancing", "cake", "baraat", "decorations" —
   auto-tagged so the search box finds moments by description.
-- **Quality & duplicates**: blurry shots and duplicates are flagged so
-  the slideshow shows the good ones. Duplicates also lose leaderboard
-  points (see above) — same photo uploaded twice can't win twice.
+- **Duplicates folder 🔁**: when the same photo arrives twice (say once
+  on WhatsApp, once in full quality) or as a burst / retake of the same
+  pose, only the best-looking shot (highest resolution, sharpest, well
+  exposed) stays in the album; the rest go to the **Duplicates** folder,
+  a chip in the album. Nothing is deleted. In the viewer, family can
+  tap **⭐ Use this one** to swap a shot in, **↩ Back to album** if it
+  isn't a duplicate, or **🔁 Move to Duplicates** for one it missed.
+  Photos from before this feature are sorted automatically at startup.
+  Blurry shots are still flagged so the slideshow shows the good ones.
 
 Run the AI pass after uploads (e.g. nightly or on demand):
 

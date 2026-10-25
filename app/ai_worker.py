@@ -1,7 +1,7 @@
 """AI worker — run after uploads:  python -m app.ai_worker
 
 Always-on (Pillow only):
-  * perceptual hash + duplicate marking (tag 'duplicate')
+  * perceptual hash (duplicates are handled at upload time — see dedupe.py)
   * blur score (very blurry shots tagged 'blurry', hidden from highlights)
 
 Optional (pip install -r requirements-ai.txt):
@@ -71,10 +71,6 @@ def analyze_one(db, photo_id):
         return
     db.execute("UPDATE photos SET phash = ?, blur_score = ?, brightness = ? WHERE id = ?",
                (h, b, br, photo_id))
-    dup = db.execute("SELECT id FROM photos WHERE phash = ? AND id != ? LIMIT 1",
-                     (h, photo_id)).fetchone()
-    if dup:
-        db.execute("INSERT OR IGNORE INTO photo_tags VALUES (?,?,?)", (photo_id, "duplicate", 1.0))
     if b < 40:
         db.execute("INSERT OR IGNORE INTO photo_tags VALUES (?,?,?)", (photo_id, "blurry", 1.0))
     db.commit()
@@ -82,7 +78,6 @@ def analyze_one(db, photo_id):
 
 
 def quality_pass(db):
-    seen = {}
     rows = db.execute("SELECT id, filename FROM photos WHERE ai_done = 0").fetchall()
     for r in rows:
         path = os.path.join(store.MEDIA_DIR, r["filename"])
@@ -92,10 +87,6 @@ def quality_pass(db):
         except Exception:
             continue
         db.execute("UPDATE photos SET phash = ?, blur_score = ? WHERE id = ?", (h, b, r["id"]))
-        if h in seen:
-            db.execute("INSERT OR IGNORE INTO photo_tags VALUES (?,?,?)", (r["id"], "duplicate", 1.0))
-        else:
-            seen[h] = r["id"]
         if b < 40:
             db.execute("INSERT OR IGNORE INTO photo_tags VALUES (?,?,?)", (r["id"], "blurry", 1.0))
     db.commit()
@@ -154,7 +145,7 @@ def face_pass(db):
         import insightface
         model = insightface.app.FaceAnalysis(name="buffalo_l")
         model.prepare(ctx_id=-1)
-        for r in db.execute("SELECT id, filename FROM photos").fetchall():
+        for r in db.execute("SELECT id, filename FROM photos WHERE COALESCE(hidden, 0) = 0").fetchall():
             faces = model.get(os.path.join(store.MEDIA_DIR, r["filename"]))
             for f in faces:
                 embeddings.append((r["id"], list(f.normed_embedding)))
@@ -163,7 +154,7 @@ def face_pass(db):
         thresh = 0.45
     else:
         import face_recognition
-        for r in db.execute("SELECT id, filename FROM photos").fetchall():
+        for r in db.execute("SELECT id, filename FROM photos WHERE COALESCE(hidden, 0) = 0").fetchall():
             img = face_recognition.load_image_file(os.path.join(store.MEDIA_DIR, r["filename"]))
             for enc in face_recognition.face_encodings(img):
                 embeddings.append((r["id"], list(enc)))
@@ -200,7 +191,7 @@ def tag_pass(db):
     with torch.no_grad():
         tf = model.encode_text(texts)
         tf /= tf.norm(dim=-1, keepdim=True)
-    for r in db.execute("SELECT id, filename FROM photos").fetchall():
+    for r in db.execute("SELECT id, filename FROM photos WHERE COALESCE(hidden, 0) = 0").fetchall():
         try:
             img = preprocess(Image.open(os.path.join(store.MEDIA_DIR, r["filename"])).convert("RGB")).unsqueeze(0)
         except Exception:
