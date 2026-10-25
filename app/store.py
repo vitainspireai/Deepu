@@ -73,13 +73,6 @@ CREATE TABLE IF NOT EXISTS comments (
     text        TEXT NOT NULL,
     created_at  REAL NOT NULL
 );
-CREATE TABLE IF NOT EXISTS near_pairs (    -- look-alike photos for the "Almost duplicates" review
-    a           TEXT NOT NULL,
-    b           TEXT NOT NULL,              -- a < b
-    d           INTEGER NOT NULL,           -- fingerprint distance (see dedupe.py)
-    dismissed   INTEGER DEFAULT 0,          -- family said "not a duplicate"
-    PRIMARY KEY (a, b)
-);
 CREATE INDEX IF NOT EXISTS idx_photos_event ON photos(event);
 CREATE INDEX IF NOT EXISTS idx_faces_person ON photo_faces(person_id);
 """
@@ -97,7 +90,7 @@ def connect():
                        ("uploader_wa", "TEXT"), ("memory_year", "TEXT"),
                        ("dhash", "TEXT"), ("hidden", "INTEGER DEFAULT 0"), ("duplicate_of", "TEXT"),
                        ("grouped", "INTEGER DEFAULT 0"), ("dup_keep", "INTEGER DEFAULT 0"),
-                       ("dup_pick", "INTEGER DEFAULT 0"), ("paired", "INTEGER DEFAULT 0")):
+                       ("dup_pick", "INTEGER DEFAULT 0"), ("dup_kind", "TEXT")):
         if col not in cols:
             db.execute(f"ALTER TABLE photos ADD COLUMN {col} {ctype}")
     db.commit()
